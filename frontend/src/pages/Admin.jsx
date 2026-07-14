@@ -183,9 +183,10 @@ function Admin() {
       {toast && <div className={`admin-toast admin-toast--${toast.type}`}>{toast.message}</div>}
 
       <div className="page-grid">
-        <Card title="Buildings" value={String(displayStats.building_count)} detail="Registered campus buildings" accent="Managed" />
-        <Card title="Total energy" value={`${displayStats.total_energy_mwh} MWh`} detail="Combined latest readings" accent="Live" />
-        <Card title="AI predictions" value={String(displayStats.prediction_count)} detail="Predictions stored in database" accent="Smart" />
+        <Card title="User count" value="1" detail="Authenticated operator" accent="Users" />
+        <Card title="Building count" value={String(displayStats.building_count)} detail="Registered campus buildings" accent="Managed" />
+        <Card title="Recent predictions" value={String(displayStats.prediction_count)} detail="Predictions stored in database" accent="Smart" />
+        <Card title="System status" value={liveStatus === 'live' ? 'Live' : liveStatus === 'connecting' ? 'Connecting' : 'Offline'} detail="Real-time monitoring" accent="Online" />
       </div>
 
       <div className="admin-panels">

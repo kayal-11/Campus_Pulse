@@ -48,7 +48,7 @@ function Home() {
         detail={`${overview?.building_count ?? 0} buildings monitored`}
         accent="On track"
       />
-      <Chart title="Energy trend" data={trend.length ? trend : [{ label: '—', value: 0 }]} />
+      <Chart title="Energy trend" type="line" data={trend.length ? trend : [{ label: '—', value: 0 }]} />
 
       <Card
         title="Priority alerts"
