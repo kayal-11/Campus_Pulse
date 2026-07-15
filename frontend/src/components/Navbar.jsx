@@ -2,9 +2,10 @@ import { useAuth } from '../context/AuthContext';
 import { useCampusData } from '../context/CampusDataContext';
 import { exportReport } from '../services/api';
 
-function Navbar({ title }) {
+function Navbar({ title, searchValue = '', onSearchChange }) {
   const { user, logout } = useAuth();
   const { liveStatus } = useCampusData();
+  const isAdmin = title === 'Admin';
 
   const initials = user?.name
     ?.split(' ')
@@ -36,7 +37,17 @@ function Navbar({ title }) {
       <div className="navbar-actions">
         <label className="search-box" htmlFor="search">
           <span>⌕</span>
-          <input id="search" type="text" placeholder="Search assets" />
+          <input
+            id="search"
+            type="text"
+            placeholder="Search assets"
+            value={isAdmin ? searchValue : ''}
+            onChange={(event) => {
+              if (isAdmin && onSearchChange) {
+                onSearchChange(event.target.value);
+              }
+            }}
+          />
         </label>
         <button className="ghost-btn" type="button" onClick={handleExport}>
           Export

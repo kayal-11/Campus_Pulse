@@ -6,6 +6,21 @@ const formatKwh = (value) => `${formatEnergy(value)} kWh`;
 const formatMwh = (value) => `${formatEnergy(value)} MWh`;
 const chartPalette = ['#2563eb', '#8b5cf6', '#22c55e', '#f59e0b', '#ef4444'];
 
+function polarToCartesian(cx, cy, radius, angleInDegrees) {
+  const radians = (angleInDegrees - 90) * (Math.PI / 180);
+  return {
+    x: cx + radius * Math.cos(radians),
+    y: cy + radius * Math.sin(radians),
+  };
+}
+
+function buildPieSlicePath(cx, cy, radius, startAngle, endAngle) {
+  const start = polarToCartesian(cx, cy, radius, startAngle);
+  const end = polarToCartesian(cx, cy, radius, endAngle);
+  const largeArcFlag = endAngle - startAngle > 180 ? 1 : 0;
+  return `M ${cx} ${cy} L ${start.x} ${start.y} A ${radius} ${radius} 0 ${largeArcFlag} 1 ${end.x} ${end.y} Z`;
+}
+
 function getRiskLevel(value) {
   if (value > 16000) return 'High';
   if (value > 12000) return 'Medium';
@@ -122,17 +137,20 @@ function PredictionChart({ title, description, data, type = 'line' }) {
             <h4>{description}</h4>
           </div>
         </div>
-        <div className="chart-bars">
+        <div className="horizontal-bars" role="img" aria-label={title}>
           {data.map((item, index) => {
-            const height = maxValue > 0 ? Math.max(10, (Number(item.value) || 0) / maxValue * 100) : 0;
+            const value = Number(item.value) || 0;
+            const width = maxValue > 0 ? Math.max(8, (value / maxValue) * 100) : 0;
             const color = item.color || chartPalette[index % chartPalette.length];
             return (
-              <div key={item.label} className="chart-bar-item">
-                <div className="bar-track">
-                  <div className="bar-fill" style={{ height: `${height}%`, background: `linear-gradient(180deg, ${color} 0%, ${color}CC 100%)` }} />
+              <div key={item.label} className="horizontal-bar-item">
+                <div className="horizontal-bar-label">
+                  <span>{item.label}</span>
+                  <small>{formatEnergy(value)}</small>
                 </div>
-                <span>{item.label}</span>
-                <small>{formatEnergy(Number(item.value) || 0)}</small>
+                <div className="horizontal-bar-track">
+                  <div className="horizontal-bar-fill" style={{ width: `${width}%`, background: `linear-gradient(90deg, ${color} 0%, ${color}CC 100%)` }} />
+                </div>
               </div>
             );
           })}
@@ -143,7 +161,7 @@ function PredictionChart({ title, description, data, type = 'line' }) {
 
   if (type === 'pie') {
     const total = data.reduce((sum, item) => sum + Math.max(0, Number(item.value) || 0), 0);
-    let offset = 0;
+    let startAngle = 0;
 
     return (
       <div className="chart-card" title={description}>
@@ -157,18 +175,38 @@ function PredictionChart({ title, description, data, type = 'line' }) {
           <svg viewBox="0 0 120 120" className="pie-chart" aria-label={title}>
             <circle cx="60" cy="60" r="42" className="pie-chart__base" />
             {data.map((item, index) => {
-              const value = Number(item.value) || 0;
-              const slice = total > 0 ? (value / total) * 360 : 0;
-              const path = `M60,60 L60,18 A42,42 0 0,1 ${60 + 42 * Math.sin((slice / 180) * Math.PI)} ${60 - 42 * Math.cos((slice / 180) * Math.PI)} Z`;
-              const circle = <path key={item.label} d={path} className="pie-chart__slice" style={{ transformOrigin: '60px 60px', transform: `rotate(${offset}deg)`, stroke: item.color || chartPalette[index % chartPalette.length] }} />;
-              offset += slice;
-              return circle;
+              const value = Math.max(0, Number(item.value) || 0);
+              const sweepAngle = total > 0 ? (value / total) * 360 : 0;
+              const endAngle = startAngle + sweepAngle;
+
+              if (sweepAngle <= 0) {
+                return null;
+              }
+
+              const path = buildPieSlicePath(60, 60, 42, startAngle, endAngle);
+              startAngle = endAngle;
+
+              return (
+                <path
+                  key={item.label}
+                  d={path}
+                  className="pie-chart__slice"
+                  style={{ fill: item.color || chartPalette[index % chartPalette.length] }}
+                />
+              );
             })}
           </svg>
           <ul className="legend-list">
-            {data.map((item, index) => (
-              <li key={item.label}><span className="legend-dot" style={{ backgroundColor: item.color || chartPalette[index % chartPalette.length] }} />{item.label}</li>
-            ))}
+            {data.map((item, index) => {
+              const value = Math.max(0, Number(item.value) || 0);
+              const share = total > 0 ? (value / total) * 100 : 0;
+              return (
+                <li key={item.label}>
+                  <span className="legend-dot" style={{ backgroundColor: item.color || chartPalette[index % chartPalette.length] }} />
+                  {item.label} ({share.toFixed(1)}%)
+                </li>
+              );
+            })}
           </ul>
         </div>
       </div>

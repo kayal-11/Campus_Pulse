@@ -67,7 +67,7 @@ function Analytics() {
           <Chart
             title="Energy distribution"
             subtitle="Pie-style distribution"
-            type="distribution"
+            type="pie"
             data={distributionData}
             emptyText="No distribution data available yet"
             accent="Live"
@@ -78,6 +78,7 @@ function Analytics() {
             title="Top energy buildings"
             subtitle="Highest consuming buildings"
             type="bar"
+            barOrientation="horizontal"
             data={buildingLoadData}
             emptyText="No building performance data available yet"
             accent="Monitor"
@@ -88,6 +89,7 @@ function Analytics() {
             title="Operations center"
             subtitle="Daily trend overview"
             type="line"
+            lineOptions={{ dynamicYAxis: true, smooth: true, markerSolid: true, markerRadius: 1.6 }}
             data={energyTrendData}
             emptyText="No trend data available yet"
             accent="Live"

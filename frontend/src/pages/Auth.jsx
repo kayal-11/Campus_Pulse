@@ -31,8 +31,8 @@ function Auth() {
         <div className="auth-brand">
           <span className="brand-mark">⚡</span>
           <div>
-            <h1>Campus Energy</h1>
-            <p>Optimization Platform</p>
+            <h1>Campus Pulse</h1>
+            <p>Campus Energy Optimization Platform</p>
           </div>
         </div>
 

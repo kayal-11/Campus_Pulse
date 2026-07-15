@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { CampusDataProvider } from './context/CampusDataContext';
 import MainLayout from './layouts/MainLayout';
@@ -28,8 +28,15 @@ const pages = {
 function AppContent() {
   const { isAuthenticated, loading, user } = useAuth();
   const [activePage, setActivePage] = useState('Home');
+  const [adminSearchQuery, setAdminSearchQuery] = useState('');
 
   const PageComponent = useMemo(() => pages[activePage] || Home, [activePage]);
+
+  useEffect(() => {
+    if (activePage !== 'Admin') {
+      setAdminSearchQuery('');
+    }
+  }, [activePage]);
 
   if (loading) {
     return (
@@ -45,8 +52,13 @@ function AppContent() {
 
   return (
     <CampusDataProvider key={user.id}>
-      <MainLayout activePage={activePage} onNavigate={setActivePage}>
-        <PageComponent />
+      <MainLayout
+        activePage={activePage}
+        onNavigate={setActivePage}
+        adminSearchQuery={adminSearchQuery}
+        onAdminSearchChange={setAdminSearchQuery}
+      >
+        {activePage === 'Admin' ? <Admin searchQuery={adminSearchQuery} /> : <PageComponent />}
       </MainLayout>
     </CampusDataProvider>
   );

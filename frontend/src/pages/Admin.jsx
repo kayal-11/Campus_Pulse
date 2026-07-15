@@ -10,7 +10,7 @@ import {
   runAIPredictions,
 } from '../services/api';
 
-function Admin() {
+function Admin({ searchQuery = '' }) {
   const { buildings, predictions, liveStatus, refresh } = useCampusData();
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState('');
@@ -108,6 +108,22 @@ function Admin() {
   };
 
   const formatTime = (iso) => (iso ? new Date(iso).toLocaleString() : '—');
+  const query = searchQuery.trim().toLowerCase();
+
+  const filteredBuildings = query
+    ? buildings.filter((building) => {
+        const haystack = [building.name, building.description, building.status].join(' ').toLowerCase();
+        return haystack.includes(query);
+      })
+    : buildings;
+
+  const filteredPredictions = query
+    ? predictions.filter((prediction) => {
+        const haystack = [prediction.building_name, String(prediction.meter), String(prediction.predicted_energy)].join(' ').toLowerCase();
+        return haystack.includes(query);
+      })
+    : predictions;
+
   const displayStats = stats || {
     building_count: buildings.length,
     total_energy_mwh: 0,
@@ -192,11 +208,11 @@ function Admin() {
       <div className="admin-panels">
         <section className="admin-panel">
           <h3>Buildings</h3>
-          {buildings.length === 0 ? (
-            <p className="admin-empty">No buildings yet. Click ➕ Add Building to get started.</p>
+          {filteredBuildings.length === 0 ? (
+            <p className="admin-empty">{query ? 'No buildings match your search.' : 'No buildings yet. Click ➕ Add Building to get started.'}</p>
           ) : (
             <ul className="admin-list">
-              {buildings.map((b) => (
+              {filteredBuildings.map((b) => (
                 <li key={b.id}>
                   <strong>{b.name}</strong>
                   <span className="pill">{b.status}</span>
@@ -217,11 +233,11 @@ function Admin() {
 
         <section className="admin-panel">
           <h3>Recent Predictions</h3>
-          {predictions.length === 0 ? (
-            <p className="admin-empty">No predictions yet. Click 🤖 Run AI Prediction.</p>
+          {filteredPredictions.length === 0 ? (
+            <p className="admin-empty">{query ? 'No predictions match your search.' : 'No predictions yet. Click 🤖 Run AI Prediction.'}</p>
           ) : (
             <ul className="admin-list">
-              {predictions.slice(0, 8).map((p) => (
+              {filteredPredictions.slice(0, 8).map((p) => (
                 <li key={p.id}>
                   <strong>{p.building_name}</strong>
                   <span>{p.predicted_energy.toFixed(1)} kWh</span>

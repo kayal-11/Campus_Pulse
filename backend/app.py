@@ -431,10 +431,27 @@ def admin_stats(db: Session = Depends(get_db), user: User = Depends(get_current_
 def export_report(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Building", "Status", "Latest Meter", "Latest Reading (kWh)", "Last Recorded"])
+    writer.writerow([
+        "Prediction ID",
+        "Building",
+        "Status",
+        "Prediction Meter",
+        "Predicted Energy (kWh)",
+        "Prediction Time",
+        "Latest Meter",
+        "Latest Reading (kWh)",
+        "Last Recorded",
+    ])
 
-    buildings = db.query(Building).filter(Building.user_id == user.id).order_by(Building.id).all()
-    for building in buildings:
+    rows = (
+        db.query(Prediction, Building)
+        .join(Building, Prediction.building_id == Building.id)
+        .filter(Building.user_id == user.id)
+        .order_by(Prediction.created_at.desc())
+        .all()
+    )
+
+    for prediction, building in rows:
         latest = (
             db.query(EnergyReading)
             .filter(EnergyReading.building_id == building.id)
@@ -442,12 +459,19 @@ def export_report(db: Session = Depends(get_db), user: User = Depends(get_curren
             .first()
         )
         writer.writerow([
+            prediction.id,
             building.name,
             building.status,
+            prediction.meter,
+            prediction.predicted_energy,
+            prediction.created_at.isoformat() if prediction.created_at else "",
             latest.meter if latest else "",
             latest.meter_reading if latest else "",
             latest.recorded_at.isoformat() if latest else "",
         ])
+
+    if not rows:
+        writer.writerow(["", "No predictions available", "", "", "", "", "", "", ""])
 
     output.seek(0)
     filename = f"campus_energy_report_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"

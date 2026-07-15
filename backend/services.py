@@ -134,40 +134,68 @@ def build_alerts(db: Session, user_id: int) -> list[AlertOut]:
 
     latest_map = _latest_readings_map(db, user_id)
     alerts: list[AlertOut] = []
+    now = datetime.now(timezone.utc)
 
     for building in buildings:
         reading = latest_map.get(building.id)
+        if not reading:
+            alerts.append(
+                AlertOut(
+                    id=f"missing-{building.id}",
+                    building_name=building.name,
+                    title="Telemetry missing",
+                    message="No live meter reading available for this building",
+                    priority="high",
+                    status="open",
+                )
+            )
+            continue
+
+        age_minutes = max(0, int((now - reading.recorded_at).total_seconds() // 60))
+        if age_minutes > 45:
+            alerts.append(
+                AlertOut(
+                    id=f"stale-{building.id}",
+                    building_name=building.name,
+                    title="Stale telemetry",
+                    message=f"Latest meter reading is {age_minutes} minutes old",
+                    priority="high",
+                    status="open",
+                )
+            )
+
+        if reading.meter_reading > 14000:
+            alerts.append(
+                AlertOut(
+                    id=f"spike-{building.id}",
+                    building_name=building.name,
+                    title="High consumption",
+                    message=f"Live meter reading {reading.meter_reading:.0f} kWh exceeds threshold",
+                    priority="high",
+                    status="open",
+                )
+            )
+        elif reading.meter_reading > 12000:
+            alerts.append(
+                AlertOut(
+                    id=f"watch-load-{building.id}",
+                    building_name=building.name,
+                    title="Rising load",
+                    message=f"Live meter reading {reading.meter_reading:.0f} kWh is approaching high-load threshold",
+                    priority="info",
+                    status="open",
+                )
+            )
+
         if building.status == "Watch":
             alerts.append(
                 AlertOut(
                     id=f"watch-{building.id}",
                     building_name=building.name,
                     title="Monitoring required",
-                    message=building.description or "Building flagged for watch status",
-                    priority="high",
-                    status="open",
-                )
-            )
-        if reading and reading.meter_reading > 14000:
-            alerts.append(
-                AlertOut(
-                    id=f"spike-{building.id}",
-                    building_name=building.name,
-                    title="High consumption",
-                    message=f"Meter reading {reading.meter_reading:.0f} kWh exceeds threshold",
-                    priority="high",
-                    status="open",
-                )
-            )
-        elif building.status == "Active" and reading:
-            alerts.append(
-                AlertOut(
-                    id=f"info-{building.id}",
-                    building_name=building.name,
-                    title="Occupancy sync",
-                    message=f"Meter {reading.meter} active — usage within expected range",
+                    message=building.description or "Building is currently in watch status",
                     priority="info",
-                    status="acknowledged",
+                    status="open",
                 )
             )
 
@@ -177,7 +205,7 @@ def build_alerts(db: Session, user_id: int) -> list[AlertOut]:
                 id="all-clear",
                 building_name="Campus",
                 title="All systems normal",
-                message="No anomalies detected across your buildings",
+                message=f"No live anomalies detected as of {now.strftime('%H:%M:%S')}",
                 priority="info",
                 status="acknowledged",
             )
