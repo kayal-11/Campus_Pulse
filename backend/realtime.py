@@ -1,6 +1,7 @@
 import json
 from typing import Any
 
+from fastapi.encoders import jsonable_encoder
 from fastapi import WebSocket
 
 
@@ -17,7 +18,7 @@ class ConnectionManager:
             self.active.remove(websocket)
 
     async def broadcast(self, event: str, data: Any):
-        payload = json.dumps({"event": event, "data": data})
+        payload = json.dumps(jsonable_encoder({"event": event, "data": data}))
         dead: list[WebSocket] = []
         for ws in self.active:
             try:

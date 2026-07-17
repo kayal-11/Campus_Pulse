@@ -22,8 +22,8 @@ function buildPieSlicePath(cx, cy, radius, startAngle, endAngle) {
 }
 
 function getRiskLevel(value) {
-  if (value > 16000) return 'High';
-  if (value > 12000) return 'Medium';
+  if (value > 1000) return 'High';
+  if (value >= 500) return 'Medium';
   return 'Low';
 }
 
@@ -338,7 +338,7 @@ function Prediction() {
   }, new Map());
 
   const latestBuildingPredictions = [...latestPredictionsByBuilding.values()].sort((a, b) => b.predicted_energy - a.predicted_energy);
-  const riskBuildings = latestBuildingPredictions.filter((prediction) => prediction.predicted_energy > 14000).length;
+  const riskBuildings = latestBuildingPredictions.filter((prediction) => prediction.predicted_energy > 1000).length;
   const rankedBuildings = latestBuildingPredictions.slice(0, 6);
   const latestRisk = latestPrediction ? getRiskLevel(latestPrediction.predicted_energy) : 'Low';
   const recommendations = latestPrediction ? getRecommendationSet(latestPrediction.predicted_energy) : [];
@@ -349,11 +349,19 @@ function Prediction() {
     value: prediction.predicted_energy,
   }));
 
+  const tomorrowForecastKwh = latestBuildingPredictions.reduce(
+    (sum, item) => sum + (Number(item.predicted_energy) || 0),
+    0,
+  );
+  const weeklyOutlookKwh = tomorrowForecastKwh * 7;
+  const monthlyTrendKwh = tomorrowForecastKwh * 30;
+  const forecastSavings = tomorrowForecastKwh * 0.05;
+
   const forecastTrendData = [
-    { label: 'Today', value: totalForecast * 1000 },
-    { label: 'Tomorrow', value: totalForecast * 1100 },
-    { label: 'Next Week', value: totalForecast * 1200 },
-    { label: 'Next Month', value: totalForecast * 1400 },
+    { label: 'Today', value: tomorrowForecastKwh },
+    { label: 'Tomorrow', value: tomorrowForecastKwh },
+    { label: 'Next Week', value: weeklyOutlookKwh },
+    { label: 'Next Month', value: monthlyTrendKwh },
   ];
 
   const distributionData = rankedBuildings.map((prediction) => ({
@@ -367,8 +375,10 @@ function Prediction() {
     { label: 'High', value: latestBuildingPredictions.filter((prediction) => getRiskLevel(prediction.predicted_energy) === 'High').length, color: '#ef4444' },
   ];
 
-  const forecastSavings = Math.max(2500, totalForecast * 180);
-  const peakDemandWarning = totalForecast > 14 ? 'Peak demand warning: forecast exceeds the safe planning threshold.' : 'Demand remains within the expected operating range.';
+  const peakThresholdKwh = Math.max(latestBuildingPredictions.length * 1000, 1000);
+  const peakDemandWarning = tomorrowForecastKwh > peakThresholdKwh
+    ? 'Peak demand warning: forecast exceeds the safe planning threshold.'
+    : 'Demand remains within the expected operating range.';
 
   if (loading) {
     return (
@@ -508,19 +518,19 @@ function Prediction() {
           <div className="future-forecast-card future-forecast-card--tomorrow">
             <span className="forecast-accent forecast-accent--blue">Tomorrow Forecast</span>
             <h4>Tomorrow Forecast</h4>
-            <div className="forecast-value">{formatKwh(totalForecast * 1000)}</div>
+            <div className="forecast-value">{formatKwh(tomorrowForecastKwh)}</div>
             <p>Estimated energy demand for the next operating day.</p>
           </div>
           <div className="future-forecast-card future-forecast-card--weekly">
             <span className="forecast-accent forecast-accent--purple">Weekly Outlook</span>
             <h4>Weekly Outlook</h4>
-            <div className="forecast-value">{formatKwh(totalForecast * 1200)}</div>
+            <div className="forecast-value">{formatKwh(weeklyOutlookKwh)}</div>
             <p>Expected demand based on current load trend and building mix.</p>
           </div>
           <div className="future-forecast-card future-forecast-card--monthly">
             <span className="forecast-accent forecast-accent--orange">Monthly Energy Trend</span>
             <h4>Monthly Energy Trend</h4>
-            <div className="forecast-value">{formatKwh(totalForecast * 1400)}</div>
+            <div className="forecast-value">{formatKwh(monthlyTrendKwh)}</div>
             <p>Projected monthly energy usage and sustainability planning signal.</p>
           </div>
           <div className="future-forecast-card future-forecast-card--savings">

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import joblib
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func
@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from auth import create_access_token, get_current_user, hash_password, verify_password
 from database import get_db
 from init_db import init_database
-from models import Building, EnergyReading, Prediction, User
+from models import Building, CampusUploadBatch, CampusUploadedReading, EnergyReading, Prediction, User
 from realtime import manager
 from schemas import (
     AdminStats,
@@ -24,6 +24,8 @@ from schemas import (
     AuthResponse,
     BuildingCreate,
     BuildingOut,
+    CampusUploadHistoryItemOut,
+    CampusUploadReportOut,
     DashboardOverview,
     EnergyInput,
     EnergyReadingOut,
@@ -35,6 +37,15 @@ from schemas import (
 )
 from services import build_alerts, get_dashboard_overview, get_energy_trend
 from feature_utils import build_feature_row
+from upload_workflow import (
+    clear_upload_history,
+    compute_campus_tomorrow_prediction,
+    delete_upload_history_item,
+    get_latest_upload_report,
+    get_upload_report_detail,
+    list_upload_history,
+    process_daily_upload,
+)
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
@@ -318,6 +329,28 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
     if not buildings:
         raise HTTPException(status_code=404, detail="No buildings found.")
 
+    latest_batch = (
+        db.query(CampusUploadBatch)
+        .filter(CampusUploadBatch.user_id == user.id)
+        .order_by(CampusUploadBatch.batch_date.desc(), CampusUploadBatch.uploaded_at.desc())
+        .first()
+    )
+    latest_totals: dict[int, float] = {}
+    if latest_batch is not None:
+        latest_rows = (
+            db.query(
+                CampusUploadedReading.building_id,
+                func.sum(CampusUploadedReading.meter_reading).label("total_kwh"),
+            )
+            .filter(
+                CampusUploadedReading.batch_id == latest_batch.id,
+                CampusUploadedReading.building_id.isnot(None),
+            )
+            .group_by(CampusUploadedReading.building_id)
+            .all()
+        )
+        latest_totals = {int(row.building_id): float(row.total_kwh or 0.0) for row in latest_rows}
+
     results = []
     for building in buildings:
         latest = (
@@ -328,7 +361,26 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
         )
         meter = latest.meter if latest else random.randint(100, 500)
 
-        if model is not None:
+        if latest_batch is not None and building.id in latest_totals:
+            today_total = max(float(latest_totals[building.id]), 0.0)
+            building_history_rows = (
+                db.query(
+                    CampusUploadBatch.batch_date,
+                    func.sum(CampusUploadedReading.meter_reading).label("total_kwh"),
+                )
+                .join(CampusUploadedReading, CampusUploadedReading.batch_id == CampusUploadBatch.id)
+                .filter(
+                    CampusUploadBatch.user_id == user.id,
+                    CampusUploadedReading.building_id == building.id,
+                )
+                .group_by(CampusUploadBatch.batch_date)
+                .order_by(CampusUploadBatch.batch_date.desc())
+                .limit(5)
+                .all()
+            )
+            history = [float(row.total_kwh or 0.0) for row in reversed(building_history_rows)]
+            predicted = compute_campus_tomorrow_prediction(today_total, history)
+        elif model is not None:
             feature_df = build_feature_row(building.id, meter, latest.recorded_at if latest else None)
             predicted = float(model.predict(feature_df)[0])
         else:
@@ -423,6 +475,87 @@ def admin_stats(db: Session = Depends(get_db), user: User = Depends(get_current_
             last_refresh=None,
             db_connected=False,
         )
+
+
+@app.post("/api/admin/uploads/daily", response_model=CampusUploadReportOut)
+async def upload_daily_meter_readings(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    filename = file.filename or "upload.csv"
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".csv", ".xlsx"}:
+        raise HTTPException(status_code=400, detail="Only CSV and XLSX uploads are supported")
+
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty")
+
+    try:
+        report = process_daily_upload(db, user, filename, payload, get_model())
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        db.rollback()
+        raise
+
+    await manager.broadcast("daily_upload_processed", report)
+    return report
+
+
+@app.get("/api/admin/uploads/history", response_model=list[CampusUploadHistoryItemOut])
+def admin_upload_history(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return list_upload_history(db, user.id)
+
+
+@app.get("/api/admin/uploads/latest", response_model=CampusUploadReportOut | None)
+def admin_latest_upload_report(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return get_latest_upload_report(db, user.id)
+
+
+@app.get("/api/admin/uploads/history/{batch_id}", response_model=CampusUploadReportOut)
+def admin_upload_report_detail(
+    batch_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        return get_upload_report_detail(db, user.id, batch_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.delete("/api/admin/uploads/history/{batch_id}")
+async def admin_delete_upload_report(
+    batch_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    try:
+        result = delete_upload_history_item(db, user.id, batch_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    await manager.broadcast("daily_upload_history_deleted", result)
+    return result
+
+
+@app.delete("/api/admin/uploads/history")
+async def admin_clear_upload_history(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    result = clear_upload_history(db, user)
+    await manager.broadcast("daily_upload_history_cleared", result)
+    return result
 
 
 # ── Export report ────────────────────────────────────────────────────────────

@@ -1,13 +1,19 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Card from '../components/Card';
 import { useCampusData } from '../context/CampusDataContext';
 import {
   addBuilding,
   deleteBuilding,
+  deleteUploadHistoryItem,
   exportReport,
   fetchAdminStats,
+  fetchLatestUploadReport,
+  fetchUploadHistory,
+  fetchUploadReport,
   refreshEnergyData,
   runAIPredictions,
+  clearAllUploadHistory,
+  uploadDailyMeterReadings,
 } from '../services/api';
 
 function Admin({ searchQuery = '' }) {
@@ -16,7 +22,27 @@ function Admin({ searchQuery = '' }) {
   const [loading, setLoading] = useState('');
   const [toast, setToast] = useState(null);
   const [showAddForm, setShowAddForm] = useState(false);
+  const [showManualEntryForm, setShowManualEntryForm] = useState(false);
   const [form, setForm] = useState({ name: '', description: '', status: 'Active' });
+  const [manualEntry, setManualEntry] = useState(() => {
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const mmDate = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const isoDate = `${yyyy}-${mmDate}-${dd}`;
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    return {
+      buildingName: '',
+      date: isoDate,
+      time: `${hh}:${mm}`,
+      meterReading: '',
+    };
+  });
+  const [uploadHistory, setUploadHistory] = useState([]);
+  const [latestUploadReport, setLatestUploadReport] = useState(null);
+  const [selectedUploadReport, setSelectedUploadReport] = useState(null);
+  const fileInputRef = useRef(null);
 
   const showToast = useCallback((message, type = 'success') => {
     setToast({ message, type });
@@ -34,6 +60,25 @@ function Admin({ searchQuery = '' }) {
   useEffect(() => {
     loadStats();
   }, [loadStats]);
+
+  const loadUploadData = useCallback(async () => {
+    try {
+      const [history, latest] = await Promise.all([fetchUploadHistory(), fetchLatestUploadReport()]);
+      setUploadHistory(history);
+      setLatestUploadReport(latest);
+      setSelectedUploadReport((current) => {
+        if (!current) return latest;
+        const updated = history.find((item) => item.id === current.batch.id);
+        return updated ? current : latest;
+      });
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    loadUploadData();
+  }, [loadUploadData]);
 
   const handleAddBuilding = async (e) => {
     e.preventDefault();
@@ -107,6 +152,115 @@ function Admin({ searchQuery = '' }) {
     }
   };
 
+  const handleUploadClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleManualEntrySubmit = async (event) => {
+    event.preventDefault();
+
+    const buildingName = manualEntry.buildingName.trim();
+    const date = manualEntry.date;
+    const time = manualEntry.time;
+    const meterReading = Number(manualEntry.meterReading);
+
+    if (!buildingName || !date || !time || Number.isNaN(meterReading) || meterReading < 0) {
+      showToast('Provide valid building name, date, time, and non-negative meter reading', 'error');
+      return;
+    }
+
+    const csvContent = [
+      'Building Name,Date,Time,Meter Reading',
+      `"${buildingName.replace(/"/g, '""')}",${date},${time},${meterReading}`,
+    ].join('\n');
+
+    const fileName = `manual-entry-${date}.csv`;
+    const file = new File([csvContent], fileName, { type: 'text/csv' });
+
+    setLoading('manual-entry');
+    try {
+      const report = await uploadDailyMeterReadings(file);
+      setLatestUploadReport(report);
+      setSelectedUploadReport(report);
+      await Promise.all([refresh(), loadStats(), loadUploadData()]);
+      showToast(`Manual entry saved for ${buildingName} (${meterReading.toFixed(2)} kWh)`);
+      setShowManualEntryForm(false);
+      setManualEntry((prev) => ({ ...prev, buildingName: '', meterReading: '' }));
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading('');
+    }
+  };
+
+  const handleDailyUpload = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    const extension = file.name.split('.').pop()?.toLowerCase();
+    if (!['csv', 'xlsx'].includes(extension || '')) {
+      showToast('Upload a CSV or XLSX file', 'error');
+      return;
+    }
+
+    setLoading('upload');
+    try {
+      const report = await uploadDailyMeterReadings(file);
+      setLatestUploadReport(report);
+      setSelectedUploadReport(report);
+      await Promise.all([refresh(), loadStats(), loadUploadData()]);
+      showToast(`Uploaded ${report.batch.record_count} daily reading(s) from ${file.name}`);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading('');
+    }
+  };
+
+  const handleOpenUploadReport = async (batchId) => {
+    setLoading(`history-${batchId}`);
+    try {
+      setSelectedUploadReport(await fetchUploadReport(batchId));
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading('');
+    }
+  };
+
+  const handleDeleteUploadHistoryItem = async (item) => {
+    const confirmed = window.confirm(`Delete upload "${item.source_filename}" from ${new Date(item.batch_date).toLocaleDateString()}?`);
+    if (!confirmed) return;
+
+    setLoading(`delete-history-${item.id}`);
+    try {
+      await deleteUploadHistoryItem(item.id);
+      await Promise.all([refresh(), loadStats(), loadUploadData()]);
+      showToast(`Deleted upload "${item.source_filename}"`);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading('');
+    }
+  };
+
+  const handleClearAllHistory = async () => {
+    const confirmed = window.confirm('Clear all campus upload history, comparisons, and prediction history? This cannot be undone.');
+    if (!confirmed) return;
+
+    setLoading('clear-history');
+    try {
+      const result = await clearAllUploadHistory();
+      await Promise.all([refresh(), loadStats(), loadUploadData()]);
+      showToast(result?.message || 'No campus upload history found. Using ASHRAE prediction model.');
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading('');
+    }
+  };
+
   const formatTime = (iso) => (iso ? new Date(iso).toLocaleString() : '—');
   const query = searchQuery.trim().toLowerCase();
 
@@ -123,6 +277,28 @@ function Admin({ searchQuery = '' }) {
         return haystack.includes(query);
       })
     : predictions;
+
+  const latestBatch = latestUploadReport?.batch;
+  const selectedBatch = selectedUploadReport?.batch;
+  const selectedComparisons = selectedUploadReport?.comparisons || [];
+  const selectedForecasts = selectedUploadReport?.forecasts || [];
+  const comparisonByBuilding = new Map(
+    selectedComparisons.map((item) => [item.building_name.toLowerCase(), item]),
+  );
+  const adminFutureForecasts = selectedForecasts.map((item) => {
+    const comparison = comparisonByBuilding.get((item.building_name || '').toLowerCase());
+    if (!comparison) {
+      return item;
+    }
+    const today = Number(comparison.today_kwh) || 0;
+    const yesterday = Number(comparison.yesterday_kwh) || 0;
+    const difference = today - yesterday;
+    const predicted = Math.max(today + (difference * 0.5), 0);
+    return {
+      ...item,
+      predicted_energy: predicted,
+    };
+  });
 
   const displayStats = stats || {
     building_count: buildings.length,
@@ -154,6 +330,9 @@ function Admin({ searchQuery = '' }) {
         <button className="admin-btn admin-btn--primary" onClick={() => setShowAddForm((v) => !v)} disabled={!!loading}>
           ➕ Add Building
         </button>
+        <button className="admin-btn admin-btn--primary" onClick={() => setShowManualEntryForm((v) => !v)} disabled={!!loading}>
+          {showManualEntryForm ? '✖ Close Manual Entry' : '✍️ Manual Meter Entry'}
+        </button>
         <button className="admin-btn admin-btn--ai" onClick={handleRunPrediction} disabled={!!loading}>
           {loading === 'predict' ? '⏳ Running…' : '🤖 Run AI Prediction'}
         </button>
@@ -163,6 +342,16 @@ function Admin({ searchQuery = '' }) {
         <button className="admin-btn admin-btn--export" onClick={handleExport} disabled={!!loading}>
           {loading === 'export' ? '⏳ Exporting…' : '📥 Export Report'}
         </button>
+        <button className="admin-btn admin-btn--primary" onClick={handleUploadClick} disabled={!!loading}>
+          {loading === 'upload' ? '⏳ Uploading…' : '📤 Upload Daily Meter Readings'}
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".csv,.xlsx"
+          onChange={handleDailyUpload}
+          hidden
+        />
       </div>
 
       {showAddForm && (
@@ -191,6 +380,59 @@ function Admin({ searchQuery = '' }) {
             <button type="button" className="ghost-btn" onClick={() => setShowAddForm(false)}>Cancel</button>
             <button type="submit" className="admin-btn admin-btn--primary" disabled={loading === 'add'}>
               {loading === 'add' ? 'Saving…' : 'Save Building'}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {showManualEntryForm && (
+        <form className="admin-form" onSubmit={handleManualEntrySubmit}>
+          <h3>Manual Meter Entry</h3>
+          <div className="admin-form-grid">
+            <label>
+              Building Name
+              <input
+                value={manualEntry.buildingName}
+                onChange={(e) => setManualEntry({ ...manualEntry, buildingName: e.target.value })}
+                placeholder="e.g. Admin Block"
+                required
+              />
+            </label>
+            <label>
+              Date
+              <input
+                type="date"
+                value={manualEntry.date}
+                onChange={(e) => setManualEntry({ ...manualEntry, date: e.target.value })}
+                required
+              />
+            </label>
+            <label>
+              Time
+              <input
+                type="time"
+                value={manualEntry.time}
+                onChange={(e) => setManualEntry({ ...manualEntry, time: e.target.value })}
+                required
+              />
+            </label>
+            <label>
+              Meter Reading
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={manualEntry.meterReading}
+                onChange={(e) => setManualEntry({ ...manualEntry, meterReading: e.target.value })}
+                placeholder="kWh"
+                required
+              />
+            </label>
+          </div>
+          <div className="admin-form-actions">
+            <button type="button" className="ghost-btn" onClick={() => setShowManualEntryForm(false)}>Cancel</button>
+            <button type="submit" className="admin-btn admin-btn--primary" disabled={loading === 'manual-entry'}>
+              {loading === 'manual-entry' ? 'Saving…' : 'Save Entry'}
             </button>
           </div>
         </form>
@@ -245,6 +487,130 @@ function Admin({ searchQuery = '' }) {
                 </li>
               ))}
             </ul>
+          )}
+        </section>
+      </div>
+
+      <div className="admin-panels">
+        <section className="admin-panel">
+          <h3>Daily Upload Summary</h3>
+          {!latestBatch ? (
+            <p className="admin-empty">No campus upload history found. Using ASHRAE prediction model.</p>
+          ) : (
+            <div className="admin-upload-summary">
+              <div className="admin-upload-grid">
+                <div>
+                  <span className="admin-kicker">Latest file</span>
+                  <strong>{latestBatch.source_filename}</strong>
+                </div>
+                <div>
+                  <span className="admin-kicker">Upload date</span>
+                  <strong>{formatTime(latestBatch.batch_date)}</strong>
+                </div>
+                <div>
+                  <span className="admin-kicker">Records stored</span>
+                  <strong>{latestBatch.record_count}</strong>
+                </div>
+                <div>
+                  <span className="admin-kicker">Total consumption</span>
+                  <strong>{latestBatch.total_kwh.toFixed(1)} kWh</strong>
+                </div>
+              </div>
+              <p className="admin-upload-meta">
+                {latestBatch.comparison_ready
+                  ? `Compared with previous upload: ${latestBatch.percentage_change?.toFixed(2) ?? '0.00'}% change, ${latestBatch.high_consumption_count} high-consumption building(s).`
+                  : 'First upload detected. Predictions continue to use the existing ASHRAE Random Forest baseline while storing campus history for future comparison.'}
+              </p>
+            </div>
+          )}
+        </section>
+
+        <section className="admin-panel">
+          <h3>Upload History</h3>
+          <div className="admin-form-actions">
+            <button
+              type="button"
+              className="ghost-btn"
+              onClick={handleClearAllHistory}
+              disabled={!!loading || uploadHistory.length === 0}
+            >
+              {loading === 'clear-history' ? 'Clearing…' : 'Clear All History'}
+            </button>
+          </div>
+          {uploadHistory.length === 0 ? (
+            <p className="admin-empty">No historical uploads available yet.</p>
+          ) : (
+            <ul className="admin-list">
+              {uploadHistory.map((item) => (
+                <li key={item.id}>
+                  <strong>{item.source_filename}</strong>
+                  <span>{new Date(item.batch_date).toLocaleDateString()}</span>
+                  <span>{item.total_kwh.toFixed(1)} kWh</span>
+                  <button
+                    type="button"
+                    className="ghost-btn"
+                    onClick={() => handleOpenUploadReport(item.id)}
+                    disabled={!!loading}
+                  >
+                    {loading === `history-${item.id}` ? 'Loading…' : 'View'}
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-btn admin-delete-btn"
+                    onClick={() => handleDeleteUploadHistoryItem(item)}
+                    disabled={!!loading}
+                  >
+                    {loading === `delete-history-${item.id}` ? 'Deleting…' : 'Delete'}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      </div>
+
+      <div className="admin-panels">
+        <section className="admin-panel">
+          <h3>{selectedBatch ? `Daily Comparison - ${new Date(selectedBatch.batch_date).toLocaleDateString()}` : 'Daily Comparison'}</h3>
+          {selectedComparisons.length === 0 ? (
+            <p className="admin-empty">Upload a daily file to compare building-wise changes against the previous uploaded day.</p>
+          ) : (
+            <ul className="admin-list">
+              {selectedComparisons.slice(0, 8).map((item) => (
+                <li key={`${item.building_name}-${item.today_kwh}`}>
+                  <strong>{item.building_name}</strong>
+                  <span>{item.today_kwh.toFixed(1)} kWh</span>
+                  <span>
+                    {item.direction === 'increase' ? '+' : item.direction === 'decrease' ? '' : '±'}
+                    {item.change_kwh.toFixed(1)} kWh
+                  </span>
+                  <span className={item.high_consumption ? 'admin-chip admin-chip--high' : 'admin-chip'}>
+                    {item.percentage_change === null ? 'Baseline' : `${item.percentage_change.toFixed(1)}%`}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <section className="admin-panel">
+          <h3>{selectedBatch ? 'Tomorrow Forecast' : 'Forecast Preview'}</h3>
+          {adminFutureForecasts.length === 0 ? (
+            <p className="admin-empty">Tomorrow predictions will appear here after a daily upload is processed.</p>
+          ) : (
+            <ul className="admin-list">
+              {adminFutureForecasts.slice(0, 8).map((item) => (
+                <li key={`${item.building_name}-${item.predicted_energy}`}>
+                  <strong>{item.building_name}</strong>
+                  <span>{item.predicted_energy.toFixed(1)} kWh</span>
+                  <span className={`admin-chip admin-chip--${item.risk_level.toLowerCase()}`}>{item.risk_level}</span>
+                  <span>{item.model_source}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {adminFutureForecasts.length > 0 && (
+            <p className="admin-upload-meta">Top recommendation: {adminFutureForecasts[0].recommendation}</p>
           )}
         </section>
       </div>

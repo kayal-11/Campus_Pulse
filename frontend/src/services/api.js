@@ -18,7 +18,10 @@ export function clearToken() {
 }
 
 async function request(path, options = {}) {
-  const headers = { 'Content-Type': 'application/json', ...options.headers };
+  const isFormData = options.body instanceof FormData;
+  const headers = isFormData
+    ? { ...options.headers }
+    : { 'Content-Type': 'application/json', ...options.headers };
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
 
@@ -76,6 +79,32 @@ export async function fetchAlerts() {
 
 export async function fetchAdminStats() {
   return request('/api/admin/stats');
+}
+
+export async function uploadDailyMeterReadings(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  return request('/api/admin/uploads/daily', { method: 'POST', body: formData });
+}
+
+export async function fetchUploadHistory() {
+  return request('/api/admin/uploads/history');
+}
+
+export async function fetchLatestUploadReport() {
+  return request('/api/admin/uploads/latest');
+}
+
+export async function fetchUploadReport(batchId) {
+  return request(`/api/admin/uploads/history/${batchId}`);
+}
+
+export async function deleteUploadHistoryItem(batchId) {
+  return request(`/api/admin/uploads/history/${batchId}`, { method: 'DELETE' });
+}
+
+export async function clearAllUploadHistory() {
+  return request('/api/admin/uploads/history', { method: 'DELETE' });
 }
 
 export async function fetchBuildings() {

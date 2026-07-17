@@ -8,3 +8,5 @@ joblib>=1.5.0
 scikit-learn>=1.9.0
 bcrypt>=4.0.0
 python-jose[cryptography]>=3.5.0
+python-multipart>=0.0.9
+openpyxl>=3.1.0

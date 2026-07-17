@@ -107,3 +107,42 @@ class AlertOut(BaseModel):
     message: str
     priority: str
     status: str
+
+
+class CampusUploadComparisonOut(BaseModel):
+    building_id: Optional[int] = None
+    building_name: str
+    today_kwh: float
+    yesterday_kwh: float
+    change_kwh: float
+    percentage_change: Optional[float] = None
+    direction: str
+    high_consumption: bool = False
+
+
+class CampusUploadForecastOut(BaseModel):
+    building_id: Optional[int] = None
+    building_name: str
+    predicted_energy: float
+    risk_level: str
+    recommendation: str
+    model_source: str
+
+
+class CampusUploadHistoryItemOut(BaseModel):
+    id: int
+    source_filename: str
+    batch_date: datetime
+    uploaded_at: datetime
+    record_count: int
+    total_kwh: float
+    previous_total_kwh: Optional[float] = None
+    percentage_change: Optional[float] = None
+    high_consumption_count: int
+    comparison_ready: bool
+
+
+class CampusUploadReportOut(BaseModel):
+    batch: CampusUploadHistoryItemOut
+    comparisons: list[CampusUploadComparisonOut]
+    forecasts: list[CampusUploadForecastOut]

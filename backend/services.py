@@ -3,8 +3,9 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from models import Building, EnergyReading, Prediction
+from models import Building, CampusUploadBatch, EnergyReading, Prediction
 from schemas import AlertOut, DashboardOverview, TrendPoint
+from upload_workflow import _build_comparison_rows, _daily_totals_for_batch
 
 DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
@@ -198,6 +199,51 @@ def build_alerts(db: Session, user_id: int) -> list[AlertOut]:
                     status="open",
                 )
             )
+
+    latest_batch = (
+        db.query(CampusUploadBatch)
+        .filter(CampusUploadBatch.user_id == user_id)
+        .order_by(CampusUploadBatch.batch_date.desc(), CampusUploadBatch.uploaded_at.desc())
+        .first()
+    )
+    if latest_batch is not None and latest_batch.comparison_ready:
+        previous_batch = (
+            db.query(CampusUploadBatch)
+            .filter(
+                CampusUploadBatch.user_id == user_id,
+                CampusUploadBatch.batch_date < latest_batch.batch_date,
+            )
+            .order_by(CampusUploadBatch.batch_date.desc(), CampusUploadBatch.uploaded_at.desc())
+            .first()
+        )
+        if previous_batch is not None:
+            comparisons = _build_comparison_rows(
+                _daily_totals_for_batch(db, latest_batch.id),
+                _daily_totals_for_batch(db, previous_batch.id),
+            )
+            for item in comparisons[:5]:
+                if item["high_consumption"]:
+                    alerts.append(
+                        AlertOut(
+                            id=f"upload-high-{latest_batch.id}-{item['building_name']}",
+                            building_name=item["building_name"],
+                            title="High daily consumption",
+                            message=f"Uploaded daily usage reached {item['today_kwh']:.0f} kWh",
+                            priority="high",
+                            status="open",
+                        )
+                    )
+                if item["percentage_change"] is not None and item["percentage_change"] >= 15:
+                    alerts.append(
+                        AlertOut(
+                            id=f"upload-rise-{latest_batch.id}-{item['building_name']}",
+                            building_name=item["building_name"],
+                            title="Daily usage increased",
+                            message=f"Usage increased {item['percentage_change']:.1f}% versus the previous uploaded day",
+                            priority="high",
+                            status="open",
+                        )
+                    )
 
     if not alerts:
         alerts.append(
