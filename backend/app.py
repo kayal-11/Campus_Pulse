@@ -353,13 +353,30 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
 
     results = []
     for building in buildings:
+        latest_uploaded = (
+            db.query(CampusUploadedReading)
+            .filter(
+                CampusUploadedReading.user_id == user.id,
+                CampusUploadedReading.building_id == building.id,
+            )
+            .order_by(CampusUploadedReading.reading_at.desc())
+            .first()
+        )
         latest = (
             db.query(EnergyReading)
             .filter(EnergyReading.building_id == building.id)
             .order_by(EnergyReading.recorded_at.desc())
             .first()
         )
-        meter = latest.meter if latest else random.randint(100, 500)
+        # Preserve model input semantics (meter type) and keep it deterministic.
+        model_meter = latest.meter if latest else 0
+        # Store/display the latest user-entered reading for this building in prediction history.
+        if latest_uploaded is not None:
+            prediction_meter = int(round(float(latest_uploaded.meter_reading)))
+        elif latest is not None:
+            prediction_meter = int(round(float(latest.meter_reading)))
+        else:
+            prediction_meter = 0
 
         if latest_batch is not None and building.id in latest_totals:
             today_total = max(float(latest_totals[building.id]), 0.0)
@@ -381,14 +398,14 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
             history = [float(row.total_kwh or 0.0) for row in reversed(building_history_rows)]
             predicted = compute_campus_tomorrow_prediction(today_total, history)
         elif model is not None:
-            feature_df = build_feature_row(building.id, meter, latest.recorded_at if latest else None)
+            feature_df = build_feature_row(building.id, model_meter, latest.recorded_at if latest else None)
             predicted = float(model.predict(feature_df)[0])
         else:
             predicted = round((latest.meter_reading if latest else 10000) * random.uniform(0.95, 1.05), 2)
 
         pred = Prediction(
             building_id=building.id,
-            meter=meter,
+            meter=prediction_meter,
             predicted_energy=predicted,
         )
         db.add(pred)
@@ -398,7 +415,7 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
                 id=pred.id,
                 building_id=building.id,
                 building_name=building.name,
-                meter=meter,
+                meter=prediction_meter,
                 predicted_energy=predicted,
                 created_at=pred.created_at,
             )

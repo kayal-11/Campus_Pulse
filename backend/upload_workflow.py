@@ -428,6 +428,94 @@ def _batch_signature_from_db(db: Session, batch_id: int) -> str:
     return _upload_rows_signature(rows)
 
 
+def _selected_building_id_for_batch(db: Session, batch_id: int) -> int | None:
+    row = (
+        db.query(
+            CampusUploadedReading.building_id,
+            func.count(CampusUploadedReading.id).label("reading_count"),
+            func.max(CampusUploadedReading.reading_at).label("latest_at"),
+        )
+        .filter(
+            CampusUploadedReading.batch_id == batch_id,
+            CampusUploadedReading.building_id.isnot(None),
+        )
+        .group_by(CampusUploadedReading.building_id)
+        .order_by(
+            func.count(CampusUploadedReading.id).desc(),
+            func.max(CampusUploadedReading.reading_at).desc(),
+            CampusUploadedReading.building_id.asc(),
+        )
+        .first()
+    )
+    if row is None or row.building_id is None:
+        return None
+    return int(row.building_id)
+
+
+def _latest_prediction_forecasts_for_user(
+    db: Session,
+    user_id: int,
+    selected_building_id: int | None = None,
+) -> list[dict[str, object]]:
+    building_query = db.query(Building.id, Building.name).filter(Building.user_id == user_id)
+    if selected_building_id is not None:
+        building_query = building_query.filter(Building.id == selected_building_id)
+    building_rows = building_query.all()
+    if not building_rows:
+        return []
+
+    building_name_by_id = {int(row.id): row.name for row in building_rows}
+    building_ids = list(building_name_by_id.keys())
+
+    latest_prediction_subq = (
+        db.query(
+            Prediction.building_id,
+            func.max(Prediction.created_at).label("max_created_at"),
+        )
+        .filter(Prediction.building_id.in_(building_ids))
+        .group_by(Prediction.building_id)
+        .subquery()
+    )
+    latest_predictions = (
+        db.query(Prediction)
+        .join(
+            latest_prediction_subq,
+            (Prediction.building_id == latest_prediction_subq.c.building_id)
+            & (Prediction.created_at == latest_prediction_subq.c.max_created_at),
+        )
+        .all()
+    )
+    if not latest_predictions:
+        return []
+
+    campus_building_ids = {
+        int(row[0])
+        for row in db.query(CampusUploadedReading.building_id)
+        .filter(
+            CampusUploadedReading.user_id == user_id,
+            CampusUploadedReading.building_id.isnot(None),
+        )
+        .distinct()
+        .all()
+    }
+
+    forecasts = []
+    for prediction in latest_predictions:
+        predicted_energy = round(float(prediction.predicted_energy), 2)
+        forecasts.append(
+            {
+                "building_id": prediction.building_id,
+                "building_name": building_name_by_id.get(int(prediction.building_id), "Building"),
+                "predicted_energy": predicted_energy,
+                "risk_level": _risk_level(predicted_energy),
+                "recommendation": _recommendation_text(predicted_energy),
+                "model_source": "campus_data" if int(prediction.building_id) in campus_building_ids else "ashrae_model",
+            }
+        )
+
+    return sorted(forecasts, key=lambda item: item["predicted_energy"], reverse=True)
+
+
 def get_upload_report_detail(db: Session, user_id: int, batch_id: int) -> dict[str, object]:
     batch = (
         db.query(CampusUploadBatch)
@@ -453,16 +541,19 @@ def get_upload_report_detail(db: Session, user_id: int, batch_id: int) -> dict[s
             _daily_totals_for_batch(db, batch.id),
             _daily_totals_for_batch(db, previous_batch.id),
         )
-    forecasts = (
-        db.query(CampusUploadForecast)
-        .filter(CampusUploadForecast.batch_id == batch.id)
-        .order_by(CampusUploadForecast.predicted_energy.desc(), CampusUploadForecast.building_name.asc())
-        .all()
-    )
-    return {
-        "batch": _history_item_from_batch(batch),
-        "comparisons": comparisons,
-        "forecasts": [
+
+    selected_building_id = _selected_building_id_for_batch(db, batch.id)
+
+    forecasts_query = db.query(CampusUploadForecast).filter(CampusUploadForecast.batch_id == batch.id)
+    if selected_building_id is not None:
+        forecasts_query = forecasts_query.filter(CampusUploadForecast.building_id == selected_building_id)
+    forecasts = forecasts_query.order_by(
+        CampusUploadForecast.predicted_energy.desc(),
+        CampusUploadForecast.building_name.asc(),
+    ).all()
+
+    if forecasts:
+        forecast_payload = [
             {
                 "building_id": forecast.building_id,
                 "building_name": forecast.building_name,
@@ -472,7 +563,14 @@ def get_upload_report_detail(db: Session, user_id: int, batch_id: int) -> dict[s
                 "model_source": forecast.model_source,
             }
             for forecast in forecasts
-        ],
+        ]
+    else:
+        forecast_payload = _latest_prediction_forecasts_for_user(db, user_id, selected_building_id)
+
+    return {
+        "batch": _history_item_from_batch(batch),
+        "comparisons": comparisons,
+        "forecasts": forecast_payload,
     }
 
 
@@ -601,61 +699,8 @@ def process_daily_upload(db: Session, user: User, filename: str, payload: bytes,
         batch.percentage_change = round(((batch.total_kwh - batch.previous_total_kwh) / batch.previous_total_kwh) * 100, 2)
     batch.high_consumption_count = sum(1 for item in comparisons if item["high_consumption"])
 
+    # Upload/manual entry must only persist campus data; no automatic forecasts here.
     forecasts: list[dict[str, object]] = []
-    if today_totals:
-        forecast_created_at = datetime.combine(batch_date, time(hour=12), tzinfo=timezone.utc)
-        building_ids = [building_id for building_id in per_building_total]
-        building_map = {
-            building.id: building
-            for building in db.query(Building).filter(Building.id.in_(building_ids)).all()
-        }
-        forecast_inputs = comparisons
-        if previous_batch is None:
-            forecast_inputs = [
-                {
-                    "building_id": value["building_id"],
-                    "building_name": value["building_name"],
-                    "today_kwh": value["total_kwh"],
-                }
-                for value in today_totals.values()
-            ]
-        for item in forecast_inputs:
-            building_id = item["building_id"]
-            if building_id is None:
-                continue
-            building = building_map[building_id]
-            forecast = _forecast_for_total(db, building, batch_date, item["today_kwh"], model)
-            db.add(
-                Prediction(
-                    building_id=building.id,
-                    meter=int(forecast["meter"]),
-                    predicted_energy=float(forecast["predicted_energy"]),
-                    created_at=forecast_created_at,
-                )
-            )
-            db.add(
-                CampusUploadForecast(
-                    batch_id=batch.id,
-                    user_id=user.id,
-                    building_id=building.id,
-                    building_name=building.name,
-                    predicted_energy=float(forecast["predicted_energy"]),
-                    risk_level=str(forecast["risk_level"]),
-                    recommendation=str(forecast["recommendation"]),
-                    model_source=str(forecast["model_source"]),
-                    created_at=forecast_created_at,
-                )
-            )
-            forecasts.append(
-                {
-                    "building_id": building.id,
-                    "building_name": building.name,
-                    "predicted_energy": round(float(forecast["predicted_energy"]), 2),
-                    "risk_level": str(forecast["risk_level"]),
-                    "recommendation": str(forecast["recommendation"]),
-                    "model_source": str(forecast["model_source"]),
-                }
-            )
 
     # Placeholder for future campus-specific retraining once enough uploaded history exists.
 
