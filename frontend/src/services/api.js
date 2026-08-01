@@ -119,6 +119,14 @@ export async function deleteBuilding(buildingId) {
   return request(`/api/buildings/${buildingId}`, { method: 'DELETE' });
 }
 
+export async function fetchBuildingInventory(buildingId) {
+  return request(`/api/buildings/${buildingId}/inventory`);
+}
+
+export async function updateBuildingInventory(buildingId, data) {
+  return request(`/api/buildings/${buildingId}/inventory`, { method: 'PUT', body: JSON.stringify(data) });
+}
+
 export async function fetchEnergyData() {
   return request('/api/energy');
 }

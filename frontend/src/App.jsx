@@ -7,7 +7,6 @@ import Home from './pages/Home';
 import Dashboard from './pages/Dashboard';
 import Energy from './pages/Energy';
 import Buildings from './pages/Buildings';
-import Analytics from './pages/Analytics';
 import Prediction from './pages/Prediction';
 import Alerts from './pages/Alerts';
 import Admin from './pages/Admin';
@@ -18,7 +17,6 @@ const pages = {
   Dashboard,
   Energy,
   Buildings,
-  Analytics,
   Prediction,
   Alerts,
   Admin,

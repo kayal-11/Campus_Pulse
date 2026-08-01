@@ -21,11 +21,28 @@ class Building(Base):
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
     owner = relationship("User", back_populates="buildings")
+    inventory = relationship("BuildingInventory", back_populates="building", uselist=False, cascade="all, delete-orphan")
     energy_readings = relationship("EnergyReading", back_populates="building", cascade="all, delete-orphan")
     predictions = relationship("Prediction", back_populates="building", cascade="all, delete-orphan")
     campus_aliases = relationship("CampusBuildingAlias", back_populates="building", cascade="all, delete-orphan")
     uploaded_readings = relationship("CampusUploadedReading", back_populates="building")
     upload_forecasts = relationship("CampusUploadForecast", back_populates="building")
+
+
+class BuildingInventory(Base):
+    __tablename__ = "building_inventory"
+
+    id = Column(Integer, primary_key=True, index=True)
+    building_id = Column(Integer, ForeignKey("buildings.id"), nullable=False, unique=True, index=True)
+    lights = Column(Integer, nullable=False, default=0)
+    fans = Column(Integer, nullable=False, default=0)
+    ac_units = Column(Integer, nullable=False, default=0)
+    computers = Column(Integer, nullable=False, default=0)
+    lab_equipment = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    building = relationship("Building", back_populates="inventory")
 
 
 class EnergyReading(Base):
@@ -136,7 +153,7 @@ class CampusUploadForecast(Base):
     predicted_energy = Column(Float, nullable=False)
     risk_level = Column(String(40), nullable=False)
     recommendation = Column(Text, nullable=False)
-    model_source = Column(String(80), nullable=False, default="ashrae_rf")
+    model_source = Column(String(80), nullable=False, default="campus_rf")
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
     batch = relationship("CampusUploadBatch", back_populates="forecasts")

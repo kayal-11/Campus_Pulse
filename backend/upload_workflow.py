@@ -509,7 +509,7 @@ def _latest_prediction_forecasts_for_user(
                 "predicted_energy": predicted_energy,
                 "risk_level": _risk_level(predicted_energy),
                 "recommendation": _recommendation_text(predicted_energy),
-                "model_source": "campus_data" if int(prediction.building_id) in campus_building_ids else "ashrae_model",
+                "model_source": "campus_data" if int(prediction.building_id) in campus_building_ids else "campus_rf",
             }
         )
 
@@ -845,5 +845,5 @@ def clear_upload_history(db: Session, user: User) -> dict[str, object]:
         "removed_energy_rows": removed_energy,
         "removed_upload_predictions": removed_upload_predictions,
         "removed_prediction_history": removed_prediction_history,
-        "message": "No campus upload history found. Using ASHRAE prediction model.",
+        "message": "No campus upload history found. Forecasts will use stored campus meter history.",
     }

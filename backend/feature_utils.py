@@ -1,61 +1,8 @@
 from datetime import datetime, timezone
-from pathlib import Path
+from statistics import mean
 from typing import Any
 
-import numpy as np
 import pandas as pd
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-BUILDING_METADATA_PATH = BASE_DIR / "dataset" / "building_metadata.feather"
-WEATHER_PATH = BASE_DIR / "dataset" / "weather_train.feather"
-
-WEATHER_COLUMNS = [
-    "air_temperature",
-    "cloud_coverage",
-    "dew_temperature",
-    "precip_depth_1_hr",
-    "sea_level_pressure",
-    "wind_speed",
-]
-
-_building_metadata: pd.DataFrame | None = None
-_weather_lookup: dict[tuple[int, datetime], dict[str, Any]] | None = None
-_site_weather_mean: pd.DataFrame | None = None
-_global_weather_mean: pd.Series | None = None
-
-
-def _load_building_metadata() -> pd.DataFrame:
-    global _building_metadata
-    if _building_metadata is None:
-        df = pd.read_feather(BUILDING_METADATA_PATH)
-        df["primary_use"] = df["primary_use"].fillna("Unknown")
-        df["square_feet"] = df["square_feet"].fillna(df["square_feet"].median())
-        df["year_built"] = df["year_built"].fillna(df["year_built"].median())
-        df["floor_count"] = df["floor_count"].fillna(-1)
-        _building_metadata = df.set_index("building_id")
-    return _building_metadata
-
-
-def _load_weather_data() -> None:
-    global _weather_lookup, _site_weather_mean, _global_weather_mean
-    if _weather_lookup is None:
-        df = pd.read_feather(WEATHER_PATH)
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
-        df["cloud_coverage"] = df["cloud_coverage"].fillna(0.0)
-        df["precip_depth_1_hr"] = df["precip_depth_1_hr"].fillna(0.0)
-        df["wind_speed"] = df["wind_speed"].fillna(0.0)
-        df["air_temperature"] = df["air_temperature"].fillna(df["air_temperature"].median())
-        df["dew_temperature"] = df["dew_temperature"].fillna(df["dew_temperature"].median())
-        df["sea_level_pressure"] = df["sea_level_pressure"].fillna(df["sea_level_pressure"].median())
-
-        _weather_lookup = {
-            (int(row.site_id), row.timestamp): {
-                col: float(row._asdict()[col]) for col in WEATHER_COLUMNS
-            }
-            for row in df.itertuples(index=False)
-        }
-        _site_weather_mean = df.groupby("site_id")[WEATHER_COLUMNS].mean()
-        _global_weather_mean = df[WEATHER_COLUMNS].mean()
 
 
 def _normalize_timestamp(value: Any) -> datetime:
@@ -63,51 +10,58 @@ def _normalize_timestamp(value: Any) -> datetime:
         return datetime.now(timezone.utc)
     if isinstance(value, datetime):
         return value
-    return pd.to_datetime(value).to_pydatetime()
+    timestamp = pd.to_datetime(value).to_pydatetime()
+    if timestamp.tzinfo is None:
+        return timestamp.replace(tzinfo=timezone.utc)
+    return timestamp
 
 
-def _get_weather_features(site_id: int, timestamp: datetime) -> dict[str, float]:
-    _load_weather_data()
-    timestamp = timestamp.replace(minute=0, second=0, microsecond=0)
-    if _weather_lookup is None:
-        raise RuntimeError("Weather data unavailable")
+def _campus_weather_proxy(history: list[float], timestamp: datetime) -> dict[str, float]:
+    baseline = mean(history[-min(len(history), 7):]) if history else 0.0
+    spread = 0.0
+    if len(history) > 1:
+        spread = max(history[-min(len(history), 7):]) - min(history[-min(len(history), 7):])
 
-    key = (site_id, timestamp)
-    if key in _weather_lookup:
-        return _weather_lookup[key]
+    seasonal = 1.0 if timestamp.month in {3, 4, 5, 9, 10, 11} else 1.2
+    weekday_factor = 1.0 if timestamp.weekday() < 5 else 0.85
+    load_index = (baseline / 1000.0) if baseline > 0 else 0.0
 
-    if _site_weather_mean is not None and site_id in _site_weather_mean.index:
-        return {col: float(_site_weather_mean.loc[site_id, col]) for col in WEATHER_COLUMNS}
+    return {
+        "air_temperature": 24.0 + (load_index * 0.9 * seasonal),
+        "cloud_coverage": min(max((spread / 800.0) * weekday_factor, 0.0), 1.0),
+        "dew_temperature": 16.0 + (load_index * 0.35),
+        "precip_depth_1_hr": 0.0,
+        "sea_level_pressure": 1012.0 - min(load_index * 1.5, 10.0),
+        "wind_speed": 2.5 + min(spread / 1200.0, 4.0),
+    }
 
-    if _global_weather_mean is not None:
-        return {col: float(_global_weather_mean[col]) for col in WEATHER_COLUMNS}
 
-    return {col: 0.0 for col in WEATHER_COLUMNS}
-
-
-def build_feature_row(building_id: int, meter: int, recorded_at: Any | None = None) -> pd.DataFrame:
-    metadata = _load_building_metadata()
+def build_feature_row(
+    building_id: int,
+    meter: int,
+    recorded_at: Any | None = None,
+    campus_history: list[float] | None = None,
+    inventory: dict[str, float] | None = None,
+) -> pd.DataFrame:
     timestamp = _normalize_timestamp(recorded_at)
+    history = [max(float(v), 0.0) for v in (campus_history or [])]
+    inv = inventory or {}
 
-    if building_id in metadata.index:
-        row = metadata.loc[building_id]
-        site_id = int(row["site_id"])
-        primary_use = str(row["primary_use"])
-        square_feet = float(row["square_feet"])
-        year_built = float(row["year_built"])
-        floor_count = float(row["floor_count"])
-    else:
-        site_id = 0
-        primary_use = "Unknown"
-        square_feet = 0.0
-        year_built = 0.0
-        floor_count = -1.0
+    lights = max(float(inv.get("lights", 0) or 0), 0.0)
+    fans = max(float(inv.get("fans", 0) or 0), 0.0)
+    ac_units = max(float(inv.get("ac_units", 0) or 0), 0.0)
+    computers = max(float(inv.get("computers", 0) or 0), 0.0)
+    lab_equipment = max(float(inv.get("lab_equipment", 0) or 0), 0.0)
 
-    weather = _get_weather_features(site_id, timestamp)
+    square_feet = (lights * 12.0) + (fans * 28.0) + (ac_units * 160.0) + (computers * 20.0) + (lab_equipment * 90.0)
+    floor_count = max(1.0, round((lights + fans + ac_units + computers + lab_equipment) / 110.0, 1))
+    year_built = float(max(1980, timestamp.year - int(min(max(building_id % 35, 5), 30))))
+
+    weather = _campus_weather_proxy(history, timestamp)
     features = {
         "building_id": int(building_id),
         "meter": int(meter),
-        "primary_use": primary_use,
+        "primary_use": "Education",
         "square_feet": square_feet,
         "year_built": year_built,
         "floor_count": floor_count,

@@ -6,6 +6,7 @@ import {
   deleteBuilding,
   deleteUploadHistoryItem,
   exportReport,
+  fetchBuildingInventory,
   fetchAdminStats,
   fetchLatestUploadReport,
   fetchUploadHistory,
@@ -13,8 +14,17 @@ import {
   refreshEnergyData,
   runAIPredictions,
   clearAllUploadHistory,
+  updateBuildingInventory,
   uploadDailyMeterReadings,
 } from '../services/api';
+
+const EMPTY_INVENTORY = {
+  lights: '',
+  fans: '',
+  ac_units: '',
+  computers: '',
+  lab_equipment: '',
+};
 
 function Admin({ searchQuery = '' }) {
   const { buildings, predictions, liveStatus, refresh } = useCampusData();
@@ -22,23 +32,9 @@ function Admin({ searchQuery = '' }) {
   const [loading, setLoading] = useState('');
   const [toast, setToast] = useState(null);
   const [showAddForm, setShowAddForm] = useState(false);
-  const [showManualEntryForm, setShowManualEntryForm] = useState(false);
-  const [form, setForm] = useState({ name: '', description: '', status: 'Active' });
-  const [manualEntry, setManualEntry] = useState(() => {
-    const now = new Date();
-    const yyyy = now.getFullYear();
-    const mmDate = String(now.getMonth() + 1).padStart(2, '0');
-    const dd = String(now.getDate()).padStart(2, '0');
-    const isoDate = `${yyyy}-${mmDate}-${dd}`;
-    const hh = String(now.getHours()).padStart(2, '0');
-    const mm = String(now.getMinutes()).padStart(2, '0');
-    return {
-      buildingName: '',
-      date: isoDate,
-      time: `${hh}:${mm}`,
-      meterReading: '',
-    };
-  });
+  const [form, setForm] = useState({ name: '', description: '', status: 'Active', initial_date: '', initial_time: '', initial_meter_reading: '' });
+  const [inventoryForm, setInventoryForm] = useState(EMPTY_INVENTORY);
+  const [editingInventory, setEditingInventory] = useState(null);
   const [uploadHistory, setUploadHistory] = useState([]);
   const [latestUploadReport, setLatestUploadReport] = useState(null);
   const [selectedUploadReport, setSelectedUploadReport] = useState(null);
@@ -80,14 +76,28 @@ function Admin({ searchQuery = '' }) {
     loadUploadData();
   }, [loadUploadData]);
 
+  const normalizeInventory = (values) => ({
+    lights: Math.max(0, Number.parseInt(values.lights || 0, 10) || 0),
+    fans: Math.max(0, Number.parseInt(values.fans || 0, 10) || 0),
+    ac_units: Math.max(0, Number.parseInt(values.ac_units || 0, 10) || 0),
+    computers: Math.max(0, Number.parseInt(values.computers || 0, 10) || 0),
+    lab_equipment: Math.max(0, Number.parseInt(values.lab_equipment || 0, 10) || 0),
+  });
+
   const handleAddBuilding = async (e) => {
     e.preventDefault();
     if (!form.name.trim()) return;
     const buildingName = form.name.trim();
     setLoading('add');
     try {
-      await addBuilding({ ...form, name: buildingName });
-      setForm({ name: '', description: '', status: 'Active' });
+      await addBuilding({
+        ...form,
+        name: buildingName,
+        initial_meter_reading: Number(form.initial_meter_reading),
+        inventory: normalizeInventory(inventoryForm),
+      });
+      setForm({ name: '', description: '', status: 'Active', initial_date: '', initial_time: '', initial_meter_reading: '' });
+      setInventoryForm(EMPTY_INVENTORY);
       setShowAddForm(false);
       await Promise.all([refresh(), loadStats()]);
       showToast(`Building "${buildingName}" added successfully`);
@@ -125,7 +135,7 @@ function Admin({ searchQuery = '' }) {
   };
 
   const handleDeleteBuilding = async (buildingId, buildingName) => {
-    const confirmed = window.confirm(`Delete building \"${buildingName}\"? This will remove only this building and its related data.`);
+    const confirmed = window.confirm(`Delete building "${buildingName}"? This will remove only this building and its related data.`);
     if (!confirmed) return;
 
     setLoading('delete');
@@ -133,6 +143,44 @@ function Admin({ searchQuery = '' }) {
       await deleteBuilding(buildingId);
       await Promise.all([refresh(), loadStats()]);
       showToast(`Building "${buildingName}" deleted`);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading('');
+    }
+  };
+
+  const handleOpenInventoryEditor = async (building) => {
+    setLoading(`inventory-${building.id}`);
+    try {
+      const current = await fetchBuildingInventory(building.id);
+      setEditingInventory({
+        buildingId: building.id,
+        buildingName: building.name,
+        values: {
+          lights: String(current.lights ?? 0),
+          fans: String(current.fans ?? 0),
+          ac_units: String(current.ac_units ?? 0),
+          computers: String(current.computers ?? 0),
+          lab_equipment: String(current.lab_equipment ?? 0),
+        },
+      });
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading('');
+    }
+  };
+
+  const handleSaveInventory = async (event) => {
+    event.preventDefault();
+    if (!editingInventory) return;
+
+    setLoading(`save-inventory-${editingInventory.buildingId}`);
+    try {
+      await updateBuildingInventory(editingInventory.buildingId, normalizeInventory(editingInventory.values));
+      showToast(`Inventory updated for ${editingInventory.buildingName}`);
+      setEditingInventory(null);
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -154,43 +202,6 @@ function Admin({ searchQuery = '' }) {
 
   const handleUploadClick = () => {
     fileInputRef.current?.click();
-  };
-
-  const handleManualEntrySubmit = async (event) => {
-    event.preventDefault();
-
-    const buildingName = manualEntry.buildingName.trim();
-    const date = manualEntry.date;
-    const time = manualEntry.time;
-    const meterReading = Number(manualEntry.meterReading);
-
-    if (!buildingName || !date || !time || Number.isNaN(meterReading) || meterReading < 0) {
-      showToast('Provide valid building name, date, time, and non-negative meter reading', 'error');
-      return;
-    }
-
-    const csvContent = [
-      'Building Name,Date,Time,Meter Reading',
-      `"${buildingName.replace(/"/g, '""')}",${date},${time},${meterReading}`,
-    ].join('\n');
-
-    const fileName = `manual-entry-${date}.csv`;
-    const file = new File([csvContent], fileName, { type: 'text/csv' });
-
-    setLoading('manual-entry');
-    try {
-      const report = await uploadDailyMeterReadings(file);
-      setLatestUploadReport(report);
-      setSelectedUploadReport(report);
-      await Promise.all([refresh(), loadStats(), loadUploadData()]);
-      showToast(`Manual entry saved for ${buildingName} (${meterReading.toFixed(2)} kWh)`);
-      setShowManualEntryForm(false);
-      setManualEntry((prev) => ({ ...prev, buildingName: '', meterReading: '' }));
-    } catch (err) {
-      showToast(err.message, 'error');
-    } finally {
-      setLoading('');
-    }
   };
 
   const handleDailyUpload = async (event) => {
@@ -253,7 +264,7 @@ function Admin({ searchQuery = '' }) {
     try {
       const result = await clearAllUploadHistory();
       await Promise.all([refresh(), loadStats(), loadUploadData()]);
-      showToast(result?.message || 'No campus upload history found. Using ASHRAE prediction model.');
+      showToast(result?.message || 'No campus upload history found. Forecasts will use stored campus meter history.');
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -330,9 +341,6 @@ function Admin({ searchQuery = '' }) {
         <button className="admin-btn admin-btn--primary" onClick={() => setShowAddForm((v) => !v)} disabled={!!loading}>
           ➕ Add Building
         </button>
-        <button className="admin-btn admin-btn--primary" onClick={() => setShowManualEntryForm((v) => !v)} disabled={!!loading}>
-          {showManualEntryForm ? '✖ Close Manual Entry' : '✍️ Manual Meter Entry'}
-        </button>
         <button className="admin-btn admin-btn--ai" onClick={handleRunPrediction} disabled={!!loading}>
           {loading === 'predict' ? '⏳ Running…' : '🤖 Run AI Prediction'}
         </button>
@@ -375,35 +383,12 @@ function Admin({ searchQuery = '' }) {
               Description
               <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Brief description" />
             </label>
-          </div>
-          <div className="admin-form-actions">
-            <button type="button" className="ghost-btn" onClick={() => setShowAddForm(false)}>Cancel</button>
-            <button type="submit" className="admin-btn admin-btn--primary" disabled={loading === 'add'}>
-              {loading === 'add' ? 'Saving…' : 'Save Building'}
-            </button>
-          </div>
-        </form>
-      )}
-
-      {showManualEntryForm && (
-        <form className="admin-form" onSubmit={handleManualEntrySubmit}>
-          <h3>Manual Meter Entry</h3>
-          <div className="admin-form-grid">
-            <label>
-              Building Name
-              <input
-                value={manualEntry.buildingName}
-                onChange={(e) => setManualEntry({ ...manualEntry, buildingName: e.target.value })}
-                placeholder="e.g. Admin Block"
-                required
-              />
-            </label>
             <label>
               Date
               <input
                 type="date"
-                value={manualEntry.date}
-                onChange={(e) => setManualEntry({ ...manualEntry, date: e.target.value })}
+                value={form.initial_date}
+                onChange={(e) => setForm({ ...form, initial_date: e.target.value })}
                 required
               />
             </label>
@@ -411,28 +396,86 @@ function Admin({ searchQuery = '' }) {
               Time
               <input
                 type="time"
-                value={manualEntry.time}
-                onChange={(e) => setManualEntry({ ...manualEntry, time: e.target.value })}
+                value={form.initial_time}
+                onChange={(e) => setForm({ ...form, initial_time: e.target.value })}
                 required
               />
             </label>
-            <label>
-              Meter Reading
+            <label className="admin-form-full">
+              Initial Meter Reading (kWh)
               <input
                 type="number"
                 min="0"
                 step="0.01"
-                value={manualEntry.meterReading}
-                onChange={(e) => setManualEntry({ ...manualEntry, meterReading: e.target.value })}
-                placeholder="kWh"
+                value={form.initial_meter_reading}
+                onChange={(e) => setForm({ ...form, initial_meter_reading: e.target.value })}
+                placeholder="0"
                 required
+              />
+            </label>
+            <div className="admin-form-full">
+              <h3>Building Inventory</h3>
+            </div>
+            <label>
+              Number of Lights
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={inventoryForm.lights}
+                onChange={(e) => setInventoryForm({ ...inventoryForm, lights: e.target.value })}
+                placeholder="0"
+              />
+            </label>
+            <label>
+              Number of Fans
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={inventoryForm.fans}
+                onChange={(e) => setInventoryForm({ ...inventoryForm, fans: e.target.value })}
+                placeholder="0"
+              />
+            </label>
+            <label>
+              Number of AC Units
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={inventoryForm.ac_units}
+                onChange={(e) => setInventoryForm({ ...inventoryForm, ac_units: e.target.value })}
+                placeholder="0"
+              />
+            </label>
+            <label>
+              Number of Computers
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={inventoryForm.computers}
+                onChange={(e) => setInventoryForm({ ...inventoryForm, computers: e.target.value })}
+                placeholder="0"
+              />
+            </label>
+            <label className="admin-form-full">
+              Number of Lab Equipment
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={inventoryForm.lab_equipment}
+                onChange={(e) => setInventoryForm({ ...inventoryForm, lab_equipment: e.target.value })}
+                placeholder="0"
               />
             </label>
           </div>
           <div className="admin-form-actions">
-            <button type="button" className="ghost-btn" onClick={() => setShowManualEntryForm(false)}>Cancel</button>
-            <button type="submit" className="admin-btn admin-btn--primary" disabled={loading === 'manual-entry'}>
-              {loading === 'manual-entry' ? 'Saving…' : 'Save Entry'}
+            <button type="button" className="ghost-btn" onClick={() => setShowAddForm(false)}>Cancel</button>
+            <button type="submit" className="admin-btn admin-btn--primary" disabled={loading === 'add'}>
+              {loading === 'add' ? 'Saving…' : 'Save Building'}
             </button>
           </div>
         </form>
@@ -461,6 +504,14 @@ function Admin({ searchQuery = '' }) {
                   <span>{b.latest_reading ? `${(b.latest_reading / 1000).toFixed(1)} MWh` : '—'}</span>
                   <button
                     type="button"
+                    className="ghost-btn"
+                    onClick={() => handleOpenInventoryEditor(b)}
+                    disabled={!!loading}
+                  >
+                    {loading === `inventory-${b.id}` ? 'Loading…' : 'Edit Inventory'}
+                  </button>
+                  <button
+                    type="button"
                     className="ghost-btn admin-delete-btn"
                     onClick={() => handleDeleteBuilding(b.id, b.name)}
                     disabled={!!loading}
@@ -470,6 +521,100 @@ function Admin({ searchQuery = '' }) {
                 </li>
               ))}
             </ul>
+          )}
+          {editingInventory && (
+            <form className="admin-form" onSubmit={handleSaveInventory}>
+              <h3>Edit Inventory - {editingInventory.buildingName}</h3>
+              <div className="admin-form-grid">
+                <label>
+                  Number of Lights
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={editingInventory.values.lights}
+                    onChange={(e) =>
+                      setEditingInventory({
+                        ...editingInventory,
+                        values: { ...editingInventory.values, lights: e.target.value },
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  Number of Fans
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={editingInventory.values.fans}
+                    onChange={(e) =>
+                      setEditingInventory({
+                        ...editingInventory,
+                        values: { ...editingInventory.values, fans: e.target.value },
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  Number of AC Units
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={editingInventory.values.ac_units}
+                    onChange={(e) =>
+                      setEditingInventory({
+                        ...editingInventory,
+                        values: { ...editingInventory.values, ac_units: e.target.value },
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  Number of Computers
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={editingInventory.values.computers}
+                    onChange={(e) =>
+                      setEditingInventory({
+                        ...editingInventory,
+                        values: { ...editingInventory.values, computers: e.target.value },
+                      })
+                    }
+                  />
+                </label>
+                <label className="admin-form-full">
+                  Number of Lab Equipment
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={editingInventory.values.lab_equipment}
+                    onChange={(e) =>
+                      setEditingInventory({
+                        ...editingInventory,
+                        values: { ...editingInventory.values, lab_equipment: e.target.value },
+                      })
+                    }
+                  />
+                </label>
+              </div>
+              <div className="admin-form-actions">
+                <button type="button" className="ghost-btn" onClick={() => setEditingInventory(null)}>
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="admin-btn admin-btn--primary"
+                  disabled={loading === `save-inventory-${editingInventory.buildingId}`}
+                >
+                  {loading === `save-inventory-${editingInventory.buildingId}` ? 'Saving…' : 'Save Inventory'}
+                </button>
+              </div>
+            </form>
           )}
         </section>
 
@@ -495,7 +640,7 @@ function Admin({ searchQuery = '' }) {
         <section className="admin-panel">
           <h3>Daily Upload Summary</h3>
           {!latestBatch ? (
-            <p className="admin-empty">No campus upload history found. Using ASHRAE prediction model.</p>
+            <p className="admin-empty">No campus upload history found. Forecasts will use stored campus meter history.</p>
           ) : (
             <div className="admin-upload-summary">
               <div className="admin-upload-grid">
@@ -519,7 +664,7 @@ function Admin({ searchQuery = '' }) {
               <p className="admin-upload-meta">
                 {latestBatch.comparison_ready
                   ? `Compared with previous upload: ${latestBatch.percentage_change?.toFixed(2) ?? '0.00'}% change, ${latestBatch.high_consumption_count} high-consumption building(s).`
-                  : 'First upload detected. Predictions continue to use the existing ASHRAE Random Forest baseline while storing campus history for future comparison.'}
+                  : 'First upload detected. Predictions continue to use the existing campus Random Forest model while storing campus history for future comparison.'}
               </p>
             </div>
           )}

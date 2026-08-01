@@ -16,13 +16,15 @@ from sqlalchemy.orm import Session
 from auth import create_access_token, get_current_user, hash_password, verify_password
 from database import get_db
 from init_db import init_database
-from models import Building, CampusUploadBatch, CampusUploadedReading, EnergyReading, Prediction, User
+from models import Building, BuildingInventory, CampusUploadBatch, CampusUploadedReading, EnergyReading, Prediction, User
 from realtime import manager
 from schemas import (
     AdminStats,
     AlertOut,
     AuthResponse,
     BuildingCreate,
+    BuildingInventoryIn,
+    BuildingInventoryOut,
     BuildingOut,
     CampusUploadHistoryItemOut,
     CampusUploadReportOut,
@@ -70,6 +72,36 @@ def get_model():
     return _model
 
 
+def _campus_history_for_building(db: Session, building_id: int, limit: int = 30) -> list[float]:
+    rows = (
+        db.query(EnergyReading.meter_reading)
+        .filter(EnergyReading.building_id == building_id)
+        .order_by(EnergyReading.recorded_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [float(row.meter_reading or 0.0) for row in reversed(rows)]
+
+
+def _inventory_features_for_building(db: Session, building_id: int) -> dict[str, float]:
+    inventory = db.query(BuildingInventory).filter(BuildingInventory.building_id == building_id).first()
+    if inventory is None:
+        return {
+            "lights": 0.0,
+            "fans": 0.0,
+            "ac_units": 0.0,
+            "computers": 0.0,
+            "lab_equipment": 0.0,
+        }
+    return {
+        "lights": float(inventory.lights or 0),
+        "fans": float(inventory.fans or 0),
+        "ac_units": float(inventory.ac_units or 0),
+        "computers": float(inventory.computers or 0),
+        "lab_equipment": float(inventory.lab_equipment or 0),
+    }
+
+
 @app.on_event("startup")
 def on_startup():
     init_database()
@@ -83,11 +115,25 @@ def home():
 
 
 @app.post("/predict")
-def predict(data: EnergyInput):
+def predict(data: EnergyInput, db: Session = Depends(get_db)):
     model = get_model()
     if model is None:
         raise HTTPException(status_code=503, detail="AI model not trained yet. Run ai/train_model.py first.")
-    feature_df = build_feature_row(data.building_id, data.meter)
+    history = _campus_history_for_building(db, data.building_id)
+    inventory = _inventory_features_for_building(db, data.building_id)
+    latest = (
+        db.query(EnergyReading)
+        .filter(EnergyReading.building_id == data.building_id)
+        .order_by(EnergyReading.recorded_at.desc())
+        .first()
+    )
+    feature_df = build_feature_row(
+        data.building_id,
+        data.meter,
+        latest.recorded_at if latest else None,
+        history,
+        inventory,
+    )
     prediction = model.predict(feature_df)
     return {
         "building_id": data.building_id,
@@ -204,6 +250,19 @@ def _building_out(building: Building, db: Session) -> BuildingOut:
     )
 
 
+def _inventory_out(inventory: BuildingInventory | None, building_id: int) -> BuildingInventoryOut:
+    if inventory is None:
+        return BuildingInventoryOut(
+            building_id=building_id,
+            lights=0,
+            fans=0,
+            ac_units=0,
+            computers=0,
+            lab_equipment=0,
+        )
+    return BuildingInventoryOut.model_validate(inventory)
+
+
 @app.get("/api/buildings", response_model=list[BuildingOut])
 def list_buildings(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     buildings = db.query(Building).filter(Building.user_id == user.id).order_by(Building.id).all()
@@ -224,11 +283,24 @@ async def add_building(
     )
     db.add(building)
     db.flush()
+    inv = payload.inventory or BuildingInventoryIn()
+    db.add(
+        BuildingInventory(
+            building_id=building.id,
+            lights=inv.lights,
+            fans=inv.fans,
+            ac_units=inv.ac_units,
+            computers=inv.computers,
+            lab_equipment=inv.lab_equipment,
+        )
+    )
+    reading_at = datetime.combine(payload.initial_date, payload.initial_time).replace(tzinfo=timezone.utc)
     db.add(
         EnergyReading(
             building_id=building.id,
-            meter=random.randint(100, 500),
-            meter_reading=round(random.uniform(5000, 18000), 2),
+            meter=0,
+            meter_reading=round(float(payload.initial_meter_reading), 2),
+            recorded_at=reading_at,
         )
     )
     db.commit()
@@ -255,6 +327,55 @@ async def delete_building(
     db.delete(building)
     db.commit()
     await manager.broadcast("building_removed", {"building_id": building_id})
+
+
+@app.get("/api/buildings/{building_id}/inventory", response_model=BuildingInventoryOut)
+def get_building_inventory(
+    building_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    building = (
+        db.query(Building)
+        .filter(Building.id == building_id, Building.user_id == user.id)
+        .first()
+    )
+    if not building:
+        raise HTTPException(status_code=404, detail="Building not found")
+
+    inventory = db.query(BuildingInventory).filter(BuildingInventory.building_id == building.id).first()
+    return _inventory_out(inventory, building.id)
+
+
+@app.put("/api/buildings/{building_id}/inventory", response_model=BuildingInventoryOut)
+def update_building_inventory(
+    building_id: int,
+    payload: BuildingInventoryIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    building = (
+        db.query(Building)
+        .filter(Building.id == building_id, Building.user_id == user.id)
+        .first()
+    )
+    if not building:
+        raise HTTPException(status_code=404, detail="Building not found")
+
+    inventory = db.query(BuildingInventory).filter(BuildingInventory.building_id == building.id).first()
+    if inventory is None:
+        inventory = BuildingInventory(building_id=building.id)
+        db.add(inventory)
+
+    inventory.lights = payload.lights
+    inventory.fans = payload.fans
+    inventory.ac_units = payload.ac_units
+    inventory.computers = payload.computers
+    inventory.lab_equipment = payload.lab_equipment
+
+    db.commit()
+    db.refresh(inventory)
+    return BuildingInventoryOut.model_validate(inventory)
 
 
 # ── Energy API ───────────────────────────────────────────────────────────────
@@ -398,7 +519,15 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
             history = [float(row.total_kwh or 0.0) for row in reversed(building_history_rows)]
             predicted = compute_campus_tomorrow_prediction(today_total, history)
         elif model is not None:
-            feature_df = build_feature_row(building.id, model_meter, latest.recorded_at if latest else None)
+            history = _campus_history_for_building(db, building.id)
+            inventory = _inventory_features_for_building(db, building.id)
+            feature_df = build_feature_row(
+                building.id,
+                model_meter,
+                latest.recorded_at if latest else None,
+                history,
+                inventory,
+            )
             predicted = float(model.predict(feature_df)[0])
         else:
             predicted = round((latest.meter_reading if latest else 10000) * random.uniform(0.95, 1.05), 2)
@@ -511,6 +640,10 @@ async def upload_daily_meter_readings(
 
     try:
         report = process_daily_upload(db, user, filename, payload, get_model())
+        try:
+            await run_ai_predictions(db, user)
+        except Exception:
+            pass
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))

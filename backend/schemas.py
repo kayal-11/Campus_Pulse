@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, time
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -9,10 +9,33 @@ class EnergyInput(BaseModel):
     meter: int
 
 
+class BuildingInventoryIn(BaseModel):
+    lights: int = Field(default=0, ge=0)
+    fans: int = Field(default=0, ge=0)
+    ac_units: int = Field(default=0, ge=0)
+    computers: int = Field(default=0, ge=0)
+    lab_equipment: int = Field(default=0, ge=0)
+
+
 class BuildingCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     description: str = ""
     status: str = "Active"
+    inventory: Optional[BuildingInventoryIn] = None
+    initial_date: date
+    initial_time: time
+    initial_meter_reading: float = Field(..., ge=0)
+
+
+class BuildingInventoryOut(BaseModel):
+    building_id: int
+    lights: int
+    fans: int
+    ac_units: int
+    computers: int
+    lab_equipment: int
+
+    model_config = {"from_attributes": True}
 
 
 class BuildingOut(BaseModel):
