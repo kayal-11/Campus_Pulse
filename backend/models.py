@@ -22,6 +22,7 @@ class Building(Base):
 
     owner = relationship("User", back_populates="buildings")
     inventory = relationship("BuildingInventory", back_populates="building", uselist=False, cascade="all, delete-orphan")
+    device_config = relationship("BuildingDeviceConfig", back_populates="building", uselist=False, cascade="all, delete-orphan")
     energy_readings = relationship("EnergyReading", back_populates="building", cascade="all, delete-orphan")
     predictions = relationship("Prediction", back_populates="building", cascade="all, delete-orphan")
     campus_aliases = relationship("CampusBuildingAlias", back_populates="building", cascade="all, delete-orphan")
@@ -43,6 +44,27 @@ class BuildingInventory(Base):
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     building = relationship("Building", back_populates="inventory")
+
+
+class BuildingDeviceConfig(Base):
+    __tablename__ = "building_device_config"
+
+    id = Column(Integer, primary_key=True, index=True)
+    building_id = Column(Integer, ForeignKey("buildings.id"), nullable=False, unique=True, index=True)
+    lights_wattage = Column(Float, nullable=False, default=20.0)
+    lights_hours = Column(Float, nullable=False, default=11.0)
+    fans_wattage = Column(Float, nullable=False, default=75.0)
+    fans_hours = Column(Float, nullable=False, default=10.0)
+    acs_wattage = Column(Float, nullable=False, default=1500.0)
+    acs_hours = Column(Float, nullable=False, default=8.0)
+    computers_wattage = Column(Float, nullable=False, default=140.0)
+    computers_hours = Column(Float, nullable=False, default=9.0)
+    lab_wattage = Column(Float, nullable=False, default=900.0)
+    lab_hours = Column(Float, nullable=False, default=7.0)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    building = relationship("Building", back_populates="device_config")
 
 
 class EnergyReading(Base):

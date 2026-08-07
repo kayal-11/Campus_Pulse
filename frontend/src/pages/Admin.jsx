@@ -26,6 +26,12 @@ const EMPTY_INVENTORY = {
   lab_equipment: '',
 };
 
+const getRiskLevel = (predictedEnergy) => {
+  if (predictedEnergy > 1000) return 'High';
+  if (predictedEnergy >= 500) return 'Medium';
+  return 'Low';
+};
+
 function Admin({ searchQuery = '' }) {
   const { buildings, predictions, liveStatus, refresh } = useCampusData();
   const [stats, setStats] = useState(null);
@@ -289,27 +295,23 @@ function Admin({ searchQuery = '' }) {
       })
     : predictions;
 
+  const sortedPredictions = [...predictions].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const latestPrediction = sortedPredictions[0] || null;
+
   const latestBatch = latestUploadReport?.batch;
   const selectedBatch = selectedUploadReport?.batch;
   const selectedComparisons = selectedUploadReport?.comparisons || [];
-  const selectedForecasts = selectedUploadReport?.forecasts || [];
-  const comparisonByBuilding = new Map(
-    selectedComparisons.map((item) => [item.building_name.toLowerCase(), item]),
-  );
-  const adminFutureForecasts = selectedForecasts.map((item) => {
-    const comparison = comparisonByBuilding.get((item.building_name || '').toLowerCase());
-    if (!comparison) {
-      return item;
-    }
-    const today = Number(comparison.today_kwh) || 0;
-    const yesterday = Number(comparison.yesterday_kwh) || 0;
-    const difference = today - yesterday;
-    const predicted = Math.max(today + (difference * 0.5), 0);
-    return {
-      ...item,
-      predicted_energy: predicted,
-    };
-  });
+  const adminFutureForecasts = latestPrediction
+    ? [
+        {
+          building_name: latestPrediction.building_name,
+          predicted_energy: latestPrediction.predicted_energy,
+          risk_level: getRiskLevel(latestPrediction.predicted_energy),
+          model_source: 'prediction_history',
+          recommendation: 'Forecast value is read from the latest saved prediction record.',
+        },
+      ]
+    : [];
 
   const displayStats = stats || {
     building_count: buildings.length,
@@ -741,7 +743,7 @@ function Admin({ searchQuery = '' }) {
         <section className="admin-panel">
           <h3>{selectedBatch ? 'Tomorrow Forecast' : 'Forecast Preview'}</h3>
           {adminFutureForecasts.length === 0 ? (
-            <p className="admin-empty">Tomorrow predictions will appear here after a daily upload is processed.</p>
+            <p className="admin-empty">Insufficient historical data for campus forecast.</p>
           ) : (
             <ul className="admin-list">
               {adminFutureForecasts.slice(0, 8).map((item) => (

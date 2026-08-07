@@ -16,13 +16,15 @@ from sqlalchemy.orm import Session
 from auth import create_access_token, get_current_user, hash_password, verify_password
 from database import get_db
 from init_db import init_database
-from models import Building, BuildingInventory, CampusUploadBatch, CampusUploadedReading, EnergyReading, Prediction, User
+from models import Building, BuildingDeviceConfig, BuildingInventory, CampusUploadBatch, CampusUploadedReading, EnergyReading, Prediction, User
 from realtime import manager
 from schemas import (
     AdminStats,
     AlertOut,
     AuthResponse,
     BuildingCreate,
+    BuildingDeviceConfigIn,
+    BuildingDeviceConfigOut,
     BuildingInventoryIn,
     BuildingInventoryOut,
     BuildingOut,
@@ -263,6 +265,24 @@ def _inventory_out(inventory: BuildingInventory | None, building_id: int) -> Bui
     return BuildingInventoryOut.model_validate(inventory)
 
 
+def _device_config_out(config: BuildingDeviceConfig | None, building_id: int) -> BuildingDeviceConfigOut:
+    if config is None:
+        return BuildingDeviceConfigOut(
+            building_id=building_id,
+            lights_wattage=20,
+            lights_hours=11,
+            fans_wattage=75,
+            fans_hours=10,
+            acs_wattage=1500,
+            acs_hours=8,
+            computers_wattage=140,
+            computers_hours=9,
+            lab_wattage=900,
+            lab_hours=7,
+        )
+    return BuildingDeviceConfigOut.model_validate(config)
+
+
 @app.get("/api/buildings", response_model=list[BuildingOut])
 def list_buildings(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     buildings = db.query(Building).filter(Building.user_id == user.id).order_by(Building.id).all()
@@ -378,6 +398,60 @@ def update_building_inventory(
     return BuildingInventoryOut.model_validate(inventory)
 
 
+@app.get("/api/buildings/{building_id}/device-config", response_model=BuildingDeviceConfigOut)
+def get_building_device_config(
+    building_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    building = (
+        db.query(Building)
+        .filter(Building.id == building_id, Building.user_id == user.id)
+        .first()
+    )
+    if not building:
+        raise HTTPException(status_code=404, detail="Building not found")
+
+    config = db.query(BuildingDeviceConfig).filter(BuildingDeviceConfig.building_id == building.id).first()
+    return _device_config_out(config, building.id)
+
+
+@app.put("/api/buildings/{building_id}/device-config", response_model=BuildingDeviceConfigOut)
+def update_building_device_config(
+    building_id: int,
+    payload: BuildingDeviceConfigIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    building = (
+        db.query(Building)
+        .filter(Building.id == building_id, Building.user_id == user.id)
+        .first()
+    )
+    if not building:
+        raise HTTPException(status_code=404, detail="Building not found")
+
+    config = db.query(BuildingDeviceConfig).filter(BuildingDeviceConfig.building_id == building.id).first()
+    if config is None:
+        config = BuildingDeviceConfig(building_id=building.id)
+        db.add(config)
+
+    config.lights_wattage = payload.lights_wattage
+    config.lights_hours = payload.lights_hours
+    config.fans_wattage = payload.fans_wattage
+    config.fans_hours = payload.fans_hours
+    config.acs_wattage = payload.acs_wattage
+    config.acs_hours = payload.acs_hours
+    config.computers_wattage = payload.computers_wattage
+    config.computers_hours = payload.computers_hours
+    config.lab_wattage = payload.lab_wattage
+    config.lab_hours = payload.lab_hours
+
+    db.commit()
+    db.refresh(config)
+    return BuildingDeviceConfigOut.model_validate(config)
+
+
 # ── Energy API ───────────────────────────────────────────────────────────────
 
 @app.get("/api/energy", response_model=list[EnergyReadingOut])
@@ -445,10 +519,10 @@ async def refresh_energy_data(db: Session = Depends(get_db), user: User = Depend
 
 @app.post("/api/predictions/run", response_model=list[PredictionOut])
 async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    model = get_model()
     buildings = db.query(Building).filter(Building.user_id == user.id).all()
     if not buildings:
         raise HTTPException(status_code=404, detail="No buildings found.")
+    building_map = {building.id: building for building in buildings}
 
     latest_batch = (
         db.query(CampusUploadBatch)
@@ -456,84 +530,87 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
         .order_by(CampusUploadBatch.batch_date.desc(), CampusUploadBatch.uploaded_at.desc())
         .first()
     )
+    if latest_batch is None:
+        raise HTTPException(status_code=400, detail="Insufficient historical data for campus forecast.")
+
     latest_totals: dict[int, float] = {}
-    if latest_batch is not None:
-        latest_rows = (
-            db.query(
-                CampusUploadedReading.building_id,
-                func.sum(CampusUploadedReading.meter_reading).label("total_kwh"),
-            )
-            .filter(
-                CampusUploadedReading.batch_id == latest_batch.id,
-                CampusUploadedReading.building_id.isnot(None),
-            )
-            .group_by(CampusUploadedReading.building_id)
-            .all()
+    latest_rows = (
+        db.query(
+            CampusUploadedReading.building_id,
+            func.sum(CampusUploadedReading.meter_reading).label("total_kwh"),
         )
-        latest_totals = {int(row.building_id): float(row.total_kwh or 0.0) for row in latest_rows}
+        .filter(
+            CampusUploadedReading.batch_id == latest_batch.id,
+            CampusUploadedReading.building_id.isnot(None),
+        )
+        .group_by(CampusUploadedReading.building_id)
+        .all()
+    )
+    latest_totals = {int(row.building_id): float(row.total_kwh or 0.0) for row in latest_rows}
+    if not latest_totals:
+        raise HTTPException(status_code=400, detail="Insufficient historical data for campus forecast.")
 
     results = []
-    for building in buildings:
-        latest_uploaded = (
-            db.query(CampusUploadedReading)
-            .filter(
-                CampusUploadedReading.user_id == user.id,
-                CampusUploadedReading.building_id == building.id,
-            )
-            .order_by(CampusUploadedReading.reading_at.desc())
-            .first()
-        )
-        latest = (
-            db.query(EnergyReading)
-            .filter(EnergyReading.building_id == building.id)
-            .order_by(EnergyReading.recorded_at.desc())
-            .first()
-        )
-        # Preserve model input semantics (meter type) and keep it deterministic.
-        model_meter = latest.meter if latest else 0
-        # Store/display the latest user-entered reading for this building in prediction history.
-        if latest_uploaded is not None:
-            prediction_meter = int(round(float(latest_uploaded.meter_reading)))
-        elif latest is not None:
-            prediction_meter = int(round(float(latest.meter_reading)))
-        else:
-            prediction_meter = 0
+    for building_id, total_kwh in latest_totals.items():
+        building = building_map.get(building_id)
+        if building is None:
+            continue
 
-        if latest_batch is not None and building.id in latest_totals:
-            today_total = max(float(latest_totals[building.id]), 0.0)
-            building_history_rows = (
-                db.query(
-                    CampusUploadBatch.batch_date,
-                    func.sum(CampusUploadedReading.meter_reading).label("total_kwh"),
-                )
-                .join(CampusUploadedReading, CampusUploadedReading.batch_id == CampusUploadBatch.id)
-                .filter(
-                    CampusUploadBatch.user_id == user.id,
-                    CampusUploadedReading.building_id == building.id,
-                )
-                .group_by(CampusUploadBatch.batch_date)
-                .order_by(CampusUploadBatch.batch_date.desc())
-                .limit(5)
-                .all()
+        today_total = max(float(total_kwh), 0.0)
+        if today_total <= 0:
+            continue
+
+        building_history_rows = (
+            db.query(
+                CampusUploadBatch.batch_date,
+                func.sum(CampusUploadedReading.meter_reading).label("total_kwh"),
             )
-            history = [float(row.total_kwh or 0.0) for row in reversed(building_history_rows)]
+            .join(CampusUploadedReading, CampusUploadedReading.batch_id == CampusUploadBatch.id)
+            .filter(
+                CampusUploadBatch.user_id == user.id,
+                CampusUploadedReading.building_id == building_id,
+            )
+            .group_by(CampusUploadBatch.batch_date)
+            .order_by(CampusUploadBatch.batch_date.desc())
+            .limit(5)
+            .all()
+        )
+        history = [float(row.total_kwh or 0.0) for row in reversed(building_history_rows)]
+        if not history:
+            continue
+
+        try:
             predicted = compute_campus_tomorrow_prediction(today_total, history)
-        elif model is not None:
-            history = _campus_history_for_building(db, building.id)
-            inventory = _inventory_features_for_building(db, building.id)
-            feature_df = build_feature_row(
-                building.id,
-                model_meter,
-                latest.recorded_at if latest else None,
-                history,
-                inventory,
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Unable to generate campus forecast. {exc}") from exc
+
+        prediction_meter = int(round(today_total))
+        latest_prediction = (
+            db.query(Prediction)
+            .filter(Prediction.building_id == building_id)
+            .order_by(Prediction.created_at.desc())
+            .first()
+        )
+
+        if (
+            latest_prediction is not None
+            and latest_prediction.meter == prediction_meter
+            and abs(float(latest_prediction.predicted_energy) - float(predicted)) < 1e-9
+        ):
+            results.append(
+                PredictionOut(
+                    id=latest_prediction.id,
+                    building_id=building_id,
+                    building_name=building.name,
+                    meter=latest_prediction.meter,
+                    predicted_energy=float(latest_prediction.predicted_energy),
+                    created_at=latest_prediction.created_at,
+                )
             )
-            predicted = float(model.predict(feature_df)[0])
-        else:
-            predicted = round((latest.meter_reading if latest else 10000) * random.uniform(0.95, 1.05), 2)
+            continue
 
         pred = Prediction(
-            building_id=building.id,
+            building_id=building_id,
             meter=prediction_meter,
             predicted_energy=predicted,
         )
@@ -542,13 +619,17 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
         results.append(
             PredictionOut(
                 id=pred.id,
-                building_id=building.id,
+                building_id=building_id,
                 building_name=building.name,
                 meter=prediction_meter,
                 predicted_energy=predicted,
                 created_at=pred.created_at,
             )
         )
+
+    if not results:
+        raise HTTPException(status_code=400, detail="Insufficient historical data for campus forecast.")
+
     db.commit()
 
     await manager.broadcast(

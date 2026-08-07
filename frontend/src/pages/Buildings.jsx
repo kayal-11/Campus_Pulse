@@ -1,14 +1,57 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Chart from '../components/Chart';
 import { useCampusData } from '../context/CampusDataContext';
+import { fetchBuildingDeviceConfig, fetchBuildingInventory, updateBuildingDeviceConfig } from '../services/api';
 
 const DEVICE_PROFILES = [
-  { key: 'lights', label: 'Lights', baseCount: 210, wattage: 20, baseHours: 11, baseDemand: 0.74, onBias: 0.9, scheduleFactor: 1 },
-  { key: 'fans', label: 'Fans', baseCount: 120, wattage: 75, baseHours: 10, baseDemand: 0.68, onBias: 0.82, scheduleFactor: 0.96 },
-  { key: 'acs', label: 'ACs', baseCount: 68, wattage: 1500, baseHours: 8, baseDemand: 0.81, onBias: 0.88, scheduleFactor: 1.02 },
-  { key: 'computers', label: 'Computers', baseCount: 160, wattage: 140, baseHours: 9, baseDemand: 0.58, onBias: 0.7, scheduleFactor: 0.92 },
-  { key: 'lab', label: 'Lab Equipment', baseCount: 38, wattage: 900, baseHours: 7, baseDemand: 0.51, onBias: 0.52, scheduleFactor: 0.86 },
+  {
+    key: 'lights',
+    label: 'Lights',
+    inventoryField: 'lights',
+    configWattageField: 'lights_wattage',
+    configHoursField: 'lights_hours',
+    defaultWattage: 20,
+    defaultHours: 11,
+  },
+  {
+    key: 'fans',
+    label: 'Fans',
+    inventoryField: 'fans',
+    configWattageField: 'fans_wattage',
+    configHoursField: 'fans_hours',
+    defaultWattage: 75,
+    defaultHours: 10,
+  },
+  {
+    key: 'acs',
+    label: 'ACs',
+    inventoryField: 'ac_units',
+    configWattageField: 'acs_wattage',
+    configHoursField: 'acs_hours',
+    defaultWattage: 1500,
+    defaultHours: 8,
+  },
+  {
+    key: 'computers',
+    label: 'Computers',
+    inventoryField: 'computers',
+    configWattageField: 'computers_wattage',
+    configHoursField: 'computers_hours',
+    defaultWattage: 140,
+    defaultHours: 9,
+  },
+  {
+    key: 'lab',
+    label: 'Lab Equipment',
+    inventoryField: 'lab_equipment',
+    configWattageField: 'lab_wattage',
+    configHoursField: 'lab_hours',
+    defaultWattage: 900,
+    defaultHours: 7,
+  },
 ];
+
+const TARIFF_PER_KWH = 0.14;
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
@@ -17,8 +60,49 @@ const deterministicFactor = (seed, offset = 0) => {
   return value - Math.floor(value);
 };
 
-function estimateDevicesForBuilding(building) {
-  const totalKwh = Number(building.latest_reading) > 0 ? Number(building.latest_reading) : 0;
+function buildDefaultDeviceInputs() {
+  return DEVICE_PROFILES.reduce((acc, device) => {
+    acc[device.key] = {
+      wattage: device.defaultWattage,
+      runtimeHours: device.defaultHours,
+    };
+    return acc;
+  }, {});
+}
+
+function buildDefaultInventoryCounts() {
+  return DEVICE_PROFILES.reduce((acc, device) => {
+    acc[device.key] = 0;
+    return acc;
+  }, {});
+}
+
+function buildDeviceInputsFromConfig(config) {
+  return DEVICE_PROFILES.reduce((acc, device) => {
+    acc[device.key] = {
+      wattage: sanitizeNumber(config?.[device.configWattageField], device.defaultWattage),
+      runtimeHours: sanitizeNumber(config?.[device.configHoursField], device.defaultHours),
+    };
+    return acc;
+  }, {});
+}
+
+function buildConfigPayloadFromInputs(inputs) {
+  return DEVICE_PROFILES.reduce((acc, device) => {
+    const current = inputs[device.key] || {};
+    acc[device.configWattageField] = sanitizeNumber(current.wattage, device.defaultWattage);
+    acc[device.configHoursField] = sanitizeNumber(current.runtimeHours, device.defaultHours);
+    return acc;
+  }, {});
+}
+
+function sanitizeNumber(value, fallback = 0) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, parsed);
+}
+
+function buildEstimatedDeviceModel(building, deviceInputs, latestBuildingEnergyKwh, inventoryCounts) {
   const seedBase = Number(building.id) || building.name.length || 1;
   const statusFactor =
     String(building.status).toLowerCase() === 'watch'
@@ -27,97 +111,69 @@ function estimateDevicesForBuilding(building) {
         ? -0.05
         : 0.03;
   const occupancy = clamp(0.44 + deterministicFactor(seedBase, 1) * 0.42 + statusFactor, 0.3, 0.95);
-  const tariffPerKwh = 0.14;
 
-  const rawRows = DEVICE_PROFILES.map((device, index) => {
-    const variability = 0.76 + deterministicFactor(seedBase, index + 3) * 0.52;
-    const count = Math.max(1, Math.round(device.baseCount * variability));
-    const runtimeHours = device.baseHours * (0.68 + occupancy * 0.58) * device.scheduleFactor;
-    const demandFactor = clamp(device.baseDemand * (0.72 + occupancy * 0.5), 0.22, 0.98);
-    const rawKwh = (count * device.wattage * runtimeHours * demandFactor) / 1000;
-    const onProbability = clamp(device.onBias * occupancy + deterministicFactor(seedBase, index + 11) * 0.2, 0.08, 0.99);
-    const isOn = onProbability >= 0.5;
-
-    const healthIndex =
-      100
-      - onProbability * 28
-      - deterministicFactor(seedBase, index + 21) * 20
-      - (String(building.status).toLowerCase() === 'watch' ? 8 : 0);
-
-    let healthLabel = 'Healthy';
-    let healthClass = 'device-health--healthy';
-    if (healthIndex < 68) {
-      healthLabel = 'Needs Service';
-      healthClass = 'device-health--critical';
-    } else if (healthIndex < 82) {
-      healthLabel = 'Monitor';
-      healthClass = 'device-health--warning';
-    }
-
+  const rowsWithDailyEnergy = DEVICE_PROFILES.map((device) => {
+    const configured = deviceInputs[device.key] || {};
+    const count = sanitizeNumber(inventoryCounts[device.key], 0);
+    const wattage = sanitizeNumber(configured.wattage, device.defaultWattage);
+    const runtimeHours = sanitizeNumber(configured.runtimeHours, device.defaultHours);
+    const estimatedKwh = (count * wattage * runtimeHours) / 1000;
     return {
       key: device.key,
       category: device.label,
       count,
-      wattage: device.wattage,
+      wattage,
       runtimeHours,
-      demandFactor,
-      rawKwh,
-      status: isOn ? 'ON' : 'OFF',
-      healthLabel,
-      healthClass,
-      estimatedSavingsPerHourKwh: ((count * device.wattage * demandFactor) / 1000),
-    };
-  });
-
-  const rawTotal = rawRows.reduce((sum, row) => sum + row.rawKwh, 0);
-  const scale = totalKwh > 0 && rawTotal > 0 ? totalKwh / rawTotal : 1;
-  const scaledTotal = rawTotal * scale;
-
-  const rows = rawRows.map((row) => {
-    const estimatedKwh = row.rawKwh * scale;
-    const percentage = scaledTotal > 0 ? (estimatedKwh / scaledTotal) * 100 : 0;
-    const monthlyCost = estimatedKwh * tariffPerKwh * 30;
-    return {
-      ...row,
       estimatedKwh,
-      percentage,
-      monthlyCost,
-      estimatedSavingsPerHourKwh: row.estimatedSavingsPerHourKwh * scale,
+      estimatedSavingsPerHourKwh: (count * wattage) / 1000,
     };
   });
 
-  const sortedByUse = [...rows].sort((a, b) => b.estimatedKwh - a.estimatedKwh);
+  const totalEstimatedKwh = rowsWithDailyEnergy.reduce((sum, row) => sum + row.estimatedKwh, 0);
+  const referenceTotalKwh = Math.max(0, Number(latestBuildingEnergyKwh) || 0);
+  const scalingFactor = totalEstimatedKwh > 0 && referenceTotalKwh > 0 ? referenceTotalKwh / totalEstimatedKwh : 0;
+
+  const rows = rowsWithDailyEnergy.map((row) => ({
+    ...row,
+    normalizedKwh: row.estimatedKwh * scalingFactor,
+    percentage: referenceTotalKwh > 0 ? ((row.estimatedKwh * scalingFactor) / referenceTotalKwh) * 100 : 0,
+    monthlyCost: row.estimatedKwh * scalingFactor * 30 * TARIFF_PER_KWH,
+  }));
+
+  const sortedByUse = [...rows].sort((a, b) => b.normalizedKwh - a.normalizedKwh);
   const top = sortedByUse[0];
   const second = sortedByUse[1];
   const lights = rows.find((row) => row.key === 'lights');
 
   const aiInsights = [
     top
-      ? `${top.category} contribute ${top.percentage.toFixed(1)}% of this building's total energy.`
+      ? `${top.category} contribute ${top.percentage.toFixed(1)}% of the estimated device energy.`
       : 'Insufficient data for contributor analysis.',
-    `Modeled occupancy is ${Math.round(occupancy * 100)}%, driving blended runtime across all categories.`,
+    `Latest historical building energy is ${referenceTotalKwh.toFixed(1)} kWh/day; device estimates are normalized to match.`,
     second
-      ? `${second.category} are the second-largest load at ${second.estimatedKwh.toFixed(1)} kWh/day.`
+      ? `${second.category} are the second-largest load at ${second.normalizedKwh.toFixed(1)} kWh/day.`
       : 'Secondary load insight is unavailable.',
   ];
 
   const recommendations = [
     top
-      ? `Reduce ${top.category} operating hours by 1 hour to save about ${top.estimatedSavingsPerHourKwh.toFixed(1)} kWh/day (${(top.estimatedSavingsPerHourKwh * tariffPerKwh * 30).toFixed(0)} USD/month).`
+      ? `Reduce ${top.category} operating hours by 1 hour to save about ${top.estimatedSavingsPerHourKwh.toFixed(1)} kWh/day (${(top.estimatedSavingsPerHourKwh * TARIFF_PER_KWH * 30).toFixed(0)} USD/month).`
       : 'Collect a full day of meter data to generate recommendations.',
     second
       ? `Shift 10% of ${second.category} operation away from peak periods to reduce cooling and demand overlap.`
       : 'Add a second major load profile to improve recommendations.',
     lights
-      ? `Apply occupancy-driven lighting schedules to trim up to ${(lights.estimatedKwh * 0.12).toFixed(1)} kWh/day from lighting consumption.`
+      ? `Apply occupancy-driven lighting schedules to trim up to ${(lights.normalizedKwh * 0.12).toFixed(1)} kWh/day from lighting consumption.`
       : 'Lighting control recommendation unavailable.',
   ];
 
   return {
     occupancy,
     rows,
-    totalKwh: scaledTotal,
-    tariffPerKwh,
+    totalKwh: referenceTotalKwh,
+    rawEstimatedTotalKwh: totalEstimatedKwh,
+    scalingFactor,
+    tariffPerKwh: TARIFF_PER_KWH,
     aiInsights,
     recommendations,
   };
@@ -126,6 +182,10 @@ function estimateDevicesForBuilding(building) {
 function Buildings() {
   const { buildings } = useCampusData();
   const [selectedBuildingId, setSelectedBuildingId] = useState(null);
+  const [deviceInputsByBuilding, setDeviceInputsByBuilding] = useState({});
+  const [inventoryByBuilding, setInventoryByBuilding] = useState({});
+  const [configLoadingByBuilding, setConfigLoadingByBuilding] = useState({});
+  const [saveState, setSaveState] = useState({ status: '', message: '' });
 
   const selectedBuilding = useMemo(() => {
     if (!buildings.length) return null;
@@ -133,10 +193,97 @@ function Buildings() {
     return buildings.find((building) => building.id === targetId) || buildings[0];
   }, [buildings, selectedBuildingId]);
 
-  const deviceModel = useMemo(() => {
+  const selectedDeviceInputs = useMemo(() => {
     if (!selectedBuilding) return null;
-    return estimateDevicesForBuilding(selectedBuilding);
+    return deviceInputsByBuilding[selectedBuilding.id] || buildDefaultDeviceInputs();
+  }, [deviceInputsByBuilding, selectedBuilding]);
+
+  useEffect(() => {
+    if (!selectedBuilding?.id) return undefined;
+
+    let cancelled = false;
+
+    const loadDeviceConfig = async () => {
+      setConfigLoadingByBuilding((prev) => ({ ...prev, [selectedBuilding.id]: true }));
+      try {
+        const config = await fetchBuildingDeviceConfig(selectedBuilding.id);
+        if (cancelled) return;
+        setDeviceInputsByBuilding((prev) => ({
+          ...prev,
+          [selectedBuilding.id]: buildDeviceInputsFromConfig(config),
+        }));
+      } catch {
+        if (cancelled) return;
+        setDeviceInputsByBuilding((prev) => ({
+          ...prev,
+          [selectedBuilding.id]: buildDefaultDeviceInputs(),
+        }));
+      } finally {
+        if (cancelled) return;
+        setConfigLoadingByBuilding((prev) => ({ ...prev, [selectedBuilding.id]: false }));
+      }
+    };
+
+    loadDeviceConfig();
+    setSaveState({ status: '', message: '' });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedBuilding?.id]);
+
+  useEffect(() => {
+    if (!selectedBuilding?.id) return undefined;
+
+    let cancelled = false;
+
+    const loadInventory = async () => {
+      try {
+        const inventory = await fetchBuildingInventory(selectedBuilding.id);
+        if (cancelled) return;
+
+        setInventoryByBuilding((prev) => ({
+          ...prev,
+          [selectedBuilding.id]: {
+            lights: sanitizeNumber(inventory?.lights, 0),
+            fans: sanitizeNumber(inventory?.fans, 0),
+            acs: sanitizeNumber(inventory?.ac_units, 0),
+            computers: sanitizeNumber(inventory?.computers, 0),
+            lab: sanitizeNumber(inventory?.lab_equipment, 0),
+          },
+        }));
+      } catch {
+        if (cancelled) return;
+        setInventoryByBuilding((prev) => ({
+          ...prev,
+          [selectedBuilding.id]: buildDefaultInventoryCounts(),
+        }));
+      }
+    };
+
+    loadInventory();
+    const interval = setInterval(loadInventory, 30000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [selectedBuilding?.id]);
+
+  const selectedInventoryCounts = useMemo(() => {
+    if (!selectedBuilding) return null;
+    return inventoryByBuilding[selectedBuilding.id] || buildDefaultInventoryCounts();
+  }, [inventoryByBuilding, selectedBuilding]);
+
+  const latestHistoricalEnergyKwh = useMemo(() => {
+    if (!selectedBuilding) return 0;
+    return Math.max(0, Number(selectedBuilding.latest_reading) || 0);
   }, [selectedBuilding]);
+
+  const deviceModel = useMemo(() => {
+    if (!selectedBuilding || !selectedDeviceInputs || !selectedInventoryCounts) return null;
+    return buildEstimatedDeviceModel(selectedBuilding, selectedDeviceInputs, latestHistoricalEnergyKwh, selectedInventoryCounts);
+  }, [selectedBuilding, selectedDeviceInputs, latestHistoricalEnergyKwh, selectedInventoryCounts]);
 
   if (!buildings.length) {
     return (
@@ -152,10 +299,50 @@ function Buildings() {
 
   const chartData = deviceModel.rows.map((row) => ({
     label: row.category,
-    value: Number(row.estimatedKwh.toFixed(1)),
+    value: Number(row.percentage.toFixed(2)),
   }));
 
-  const topDevice = [...deviceModel.rows].sort((a, b) => b.estimatedKwh - a.estimatedKwh)[0];
+  const topDevice = [...deviceModel.rows].sort((a, b) => b.normalizedKwh - a.normalizedKwh)[0];
+
+  const updateDeviceInput = (deviceKey, field, rawValue) => {
+    setSaveState({ status: '', message: '' });
+    const value = rawValue === '' ? 0 : sanitizeNumber(rawValue, 0);
+    setDeviceInputsByBuilding((prev) => {
+      const buildingId = selectedBuilding.id;
+      const currentBuildingInputs = prev[buildingId] || buildDefaultDeviceInputs();
+      const currentDevice = currentBuildingInputs[deviceKey] || {};
+
+      return {
+        ...prev,
+        [buildingId]: {
+          ...currentBuildingInputs,
+          [deviceKey]: {
+            ...currentDevice,
+            [field]: value,
+          },
+        },
+      };
+    });
+  };
+
+  const handleSaveDeviceConfiguration = async () => {
+    if (!selectedBuilding) return;
+    const payload = buildConfigPayloadFromInputs(selectedDeviceInputs || buildDefaultDeviceInputs());
+
+    setSaveState({ status: 'saving', message: '' });
+    try {
+      const saved = await updateBuildingDeviceConfig(selectedBuilding.id, payload);
+      setDeviceInputsByBuilding((prev) => ({
+        ...prev,
+        [selectedBuilding.id]: buildDeviceInputsFromConfig(saved),
+      }));
+      setSaveState({ status: 'success', message: 'Device configuration saved successfully.' });
+    } catch (error) {
+      setSaveState({ status: 'error', message: error.message || 'Failed to save device configuration.' });
+    }
+  };
+
+  const isConfigLoading = Boolean(configLoadingByBuilding[selectedBuilding.id]);
 
   return (
     <div className="buildings-page">
@@ -218,25 +405,34 @@ function Buildings() {
               <p className="card-title">Device Section</p>
               <h3>Estimated Device-wise Energy Breakdown</h3>
               <p className="card-detail">
-                Based on device count, wattage, operating hours, and occupancy. No individual IoT sub-meter assumptions.
+                Count is synced from Building Inventory. Edit power and average hours, then save this configuration for the building.
               </p>
             </div>
-            <span className="pill">AI Estimated</span>
+            <div>
+              <button
+                type="button"
+                className="pill"
+                onClick={handleSaveDeviceConfiguration}
+                disabled={isConfigLoading || saveState.status === 'saving'}
+              >
+                {saveState.status === 'saving' ? 'Saving...' : 'Save Device Configuration'}
+              </button>
+            </div>
           </div>
+          {isConfigLoading && <p className="card-detail">Loading saved device configuration...</p>}
+          {saveState.message && <p className="card-detail">{saveState.message}</p>}
 
           <div className="device-section__layout">
             <div className="device-table-wrapper">
               <table className="device-table">
                 <thead>
                   <tr>
-                    <th>Category</th>
+                    <th>Device</th>
                     <th>Count</th>
-                    <th>Wattage</th>
-                    <th>Run Hours</th>
-                    <th>Est. kWh/day</th>
-                    <th>Share</th>
-                    <th>Status</th>
-                    <th>Health</th>
+                    <th>Power (W)</th>
+                    <th>Avg Hours</th>
+                    <th>Estimated kWh/day</th>
+                    <th>Share (%)</th>
                     <th>Monthly Cost</th>
                   </tr>
                 </thead>
@@ -244,17 +440,27 @@ function Buildings() {
                   {deviceModel.rows.map((row) => (
                     <tr key={row.key}>
                       <td>{row.category}</td>
-                      <td>{row.count}</td>
-                      <td>{row.wattage} W</td>
-                      <td>{row.runtimeHours.toFixed(1)} h</td>
-                      <td>{row.estimatedKwh.toFixed(1)}</td>
+                      <td>{Math.round(row.count)}</td>
+                      <td>
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={selectedDeviceInputs[row.key]?.wattage ?? 0}
+                          onChange={(event) => updateDeviceInput(row.key, 'wattage', event.target.value)}
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={selectedDeviceInputs[row.key]?.runtimeHours ?? 0}
+                          onChange={(event) => updateDeviceInput(row.key, 'runtimeHours', event.target.value)}
+                        />
+                      </td>
+                      <td>{row.normalizedKwh.toFixed(1)}</td>
                       <td>{row.percentage.toFixed(1)}%</td>
-                      <td>
-                        <span className={`device-status ${row.status === 'ON' ? 'device-status--on' : 'device-status--off'}`}>{row.status}</span>
-                      </td>
-                      <td>
-                        <span className={`device-health ${row.healthClass}`}>{row.healthLabel}</span>
-                      </td>
                       <td>{row.monthlyCost.toFixed(0)} USD</td>
                     </tr>
                   ))}
@@ -265,7 +471,7 @@ function Buildings() {
             <div className="device-chart-wrapper">
               <Chart
                 title="Device Energy Mix"
-                subtitle="Best fit: Donut/Pie for share, with table for exact values"
+                subtitle="Share (%) derived from estimated device-wise kWh/day"
                 accent="Visual"
                 type="pie"
                 data={chartData}
@@ -276,7 +482,7 @@ function Buildings() {
 
           <div className="device-insights-grid">
             <section className="device-panel">
-              <h4>AI Insights</h4>
+              <h4>Estimation Insights</h4>
               <ul>
                 {deviceModel.aiInsights.map((insight) => (
                   <li key={insight}>{insight}</li>
@@ -299,10 +505,10 @@ function Buildings() {
 | Building Header: Name | Total kWh/day | Occupancy | Tariff |
 --------------------------------------------------------------+
 | Device Inventory Table                      | Donut/Pie Chart |
-| Category | Count | W | Hours | kWh | % | ON/OFF | Health    |
+| Device | Count | W | Hours | kWh | %                        |
 | Monthly Cost per Category                                |   |
 +--------------------------------------------------------------+
-| AI Insights                          | Recommended Actions   |
+| Estimation Insights                  | Recommended Actions   |
 +--------------------------------------------------------------+`}</pre>
           </section>
         </section>

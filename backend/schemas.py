@@ -38,6 +38,25 @@ class BuildingInventoryOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class BuildingDeviceConfigIn(BaseModel):
+    lights_wattage: float = Field(default=20, ge=0)
+    lights_hours: float = Field(default=11, ge=0)
+    fans_wattage: float = Field(default=75, ge=0)
+    fans_hours: float = Field(default=10, ge=0)
+    acs_wattage: float = Field(default=1500, ge=0)
+    acs_hours: float = Field(default=8, ge=0)
+    computers_wattage: float = Field(default=140, ge=0)
+    computers_hours: float = Field(default=9, ge=0)
+    lab_wattage: float = Field(default=900, ge=0)
+    lab_hours: float = Field(default=7, ge=0)
+
+
+class BuildingDeviceConfigOut(BuildingDeviceConfigIn):
+    building_id: int
+
+    model_config = {"from_attributes": True}
+
+
 class BuildingOut(BaseModel):
     id: int
     name: str

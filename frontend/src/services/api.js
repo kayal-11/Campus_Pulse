@@ -127,6 +127,14 @@ export async function updateBuildingInventory(buildingId, data) {
   return request(`/api/buildings/${buildingId}/inventory`, { method: 'PUT', body: JSON.stringify(data) });
 }
 
+export async function fetchBuildingDeviceConfig(buildingId) {
+  return request(`/api/buildings/${buildingId}/device-config`);
+}
+
+export async function updateBuildingDeviceConfig(buildingId, data) {
+  return request(`/api/buildings/${buildingId}/device-config`, { method: 'PUT', body: JSON.stringify(data) });
+}
+
 export async function fetchEnergyData() {
   return request('/api/energy');
 }
