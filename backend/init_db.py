@@ -35,10 +35,44 @@ def _migrate_building_ownership():
   print("Migration complete: buildings are now scoped per user.")
 
 
+def _migrate_prediction_batch_linkage():
+  inspector = inspect(engine)
+  if "predictions" not in inspector.get_table_names():
+    return
+
+  columns = {c["name"] for c in inspector.get_columns("predictions")}
+  foreign_keys = {fk.get("name") for fk in inspector.get_foreign_keys("predictions") if fk.get("name")}
+
+  with engine.begin() as conn:
+    if "source_batch_id" not in columns:
+      conn.execute(text("ALTER TABLE predictions ADD COLUMN source_batch_id INTEGER"))
+    if "prediction_for_date" not in columns:
+      conn.execute(text("ALTER TABLE predictions ADD COLUMN prediction_for_date DATE"))
+
+    if "fk_predictions_source_batch_id" not in foreign_keys:
+      try:
+        conn.execute(
+          text(
+            "ALTER TABLE predictions "
+            "ADD CONSTRAINT fk_predictions_source_batch_id "
+            "FOREIGN KEY (source_batch_id) REFERENCES campus_upload_batches(id) ON DELETE SET NULL"
+          )
+        )
+      except Exception:
+        # Keep startup resilient if the constraint already exists with a different auto-generated name.
+        pass
+
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_predictions_source_batch_id ON predictions(source_batch_id)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_predictions_prediction_for_date ON predictions(prediction_for_date)"))
+
+  print("Migration complete: predictions now support source batch linkage.")
+
+
 def init_database():
   try:
     Base.metadata.create_all(bind=engine)
     _migrate_building_ownership()
+    _migrate_prediction_batch_linkage()
   except Exception as exc:
     print(f"WARNING: Could not connect to PostgreSQL — {exc}")
     print("Set DATABASE_URL in .env and run: python backend/setup_db.py")

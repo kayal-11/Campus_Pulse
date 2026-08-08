@@ -2,7 +2,7 @@ import csv
 import io
 import os
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import joblib
@@ -532,6 +532,7 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
     )
     if latest_batch is None:
         raise HTTPException(status_code=400, detail="Insufficient historical data for campus forecast.")
+    prediction_for_date = latest_batch.batch_date + timedelta(days=1)
 
     latest_totals: dict[int, float] = {}
     latest_rows = (
@@ -587,7 +588,10 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
         prediction_meter = int(round(today_total))
         latest_prediction = (
             db.query(Prediction)
-            .filter(Prediction.building_id == building_id)
+            .filter(
+                Prediction.building_id == building_id,
+                Prediction.source_batch_id == latest_batch.id,
+            )
             .order_by(Prediction.created_at.desc())
             .first()
         )
@@ -596,14 +600,17 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
             latest_prediction is not None
             and latest_prediction.meter == prediction_meter
             and abs(float(latest_prediction.predicted_energy) - float(predicted)) < 1e-9
+            and latest_prediction.prediction_for_date == prediction_for_date
         ):
             results.append(
                 PredictionOut(
                     id=latest_prediction.id,
                     building_id=building_id,
                     building_name=building.name,
+                    source_batch_id=latest_prediction.source_batch_id,
                     meter=latest_prediction.meter,
                     predicted_energy=float(latest_prediction.predicted_energy),
+                    prediction_for_date=latest_prediction.prediction_for_date,
                     created_at=latest_prediction.created_at,
                 )
             )
@@ -611,8 +618,10 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
 
         pred = Prediction(
             building_id=building_id,
+            source_batch_id=latest_batch.id,
             meter=prediction_meter,
             predicted_energy=predicted,
+            prediction_for_date=prediction_for_date,
         )
         db.add(pred)
         db.flush()
@@ -621,8 +630,10 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
                 id=pred.id,
                 building_id=building_id,
                 building_name=building.name,
+                source_batch_id=pred.source_batch_id,
                 meter=prediction_meter,
                 predicted_energy=predicted,
+                prediction_for_date=pred.prediction_for_date,
                 created_at=pred.created_at,
             )
         )
@@ -654,8 +665,10 @@ def list_predictions(db: Session = Depends(get_db), user: User = Depends(get_cur
             id=r.Prediction.id,
             building_id=r.Prediction.building_id,
             building_name=r.name,
+            source_batch_id=r.Prediction.source_batch_id,
             meter=r.Prediction.meter,
             predicted_energy=r.Prediction.predicted_energy,
+            prediction_for_date=r.Prediction.prediction_for_date,
             created_at=r.Prediction.created_at,
         )
         for r in rows
@@ -721,10 +734,12 @@ async def upload_daily_meter_readings(
 
     try:
         report = process_daily_upload(db, user, filename, payload, get_model())
+        batch_id = int(report["batch"]["id"])
         try:
             await run_ai_predictions(db, user)
         except Exception:
             pass
+        report = get_upload_report_detail(db, user.id, batch_id)
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))

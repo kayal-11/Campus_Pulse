@@ -84,11 +84,14 @@ class Prediction(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     building_id = Column(Integer, ForeignKey("buildings.id"), nullable=False, index=True)
+    source_batch_id = Column(Integer, ForeignKey("campus_upload_batches.id", ondelete="SET NULL"), nullable=True, index=True)
     meter = Column(Integer, nullable=False, default=0)
     predicted_energy = Column(Float, nullable=False)
+    prediction_for_date = Column(Date, nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), default=utcnow, index=True)
 
     building = relationship("Building", back_populates="predictions")
+    source_batch = relationship("CampusUploadBatch")
 
 
 class User(Base):

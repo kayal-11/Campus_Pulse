@@ -452,9 +452,10 @@ def _selected_building_id_for_batch(db: Session, batch_id: int) -> int | None:
     return int(row.building_id)
 
 
-def _latest_prediction_forecasts_for_user(
+def _batch_prediction_forecasts_for_user(
     db: Session,
     user_id: int,
+    batch_id: int,
     selected_building_id: int | None = None,
 ) -> list[dict[str, object]]:
     building_query = db.query(Building.id, Building.name).filter(Building.user_id == user_id)
@@ -472,7 +473,10 @@ def _latest_prediction_forecasts_for_user(
             Prediction.building_id,
             func.max(Prediction.created_at).label("max_created_at"),
         )
-        .filter(Prediction.building_id.in_(building_ids))
+        .filter(
+            Prediction.source_batch_id == batch_id,
+            Prediction.building_id.in_(building_ids),
+        )
         .group_by(Prediction.building_id)
         .subquery()
     )
@@ -483,6 +487,7 @@ def _latest_prediction_forecasts_for_user(
             (Prediction.building_id == latest_prediction_subq.c.building_id)
             & (Prediction.created_at == latest_prediction_subq.c.max_created_at),
         )
+        .order_by(Prediction.predicted_energy.desc(), Prediction.created_at.desc())
         .all()
     )
     if not latest_predictions:
@@ -513,7 +518,7 @@ def _latest_prediction_forecasts_for_user(
             }
         )
 
-    return sorted(forecasts, key=lambda item: item["predicted_energy"], reverse=True)
+    return forecasts
 
 
 def get_upload_report_detail(db: Session, user_id: int, batch_id: int) -> dict[str, object]:
@@ -565,7 +570,12 @@ def get_upload_report_detail(db: Session, user_id: int, batch_id: int) -> dict[s
             for forecast in forecasts
         ]
     else:
-        forecast_payload = _latest_prediction_forecasts_for_user(db, user_id, selected_building_id)
+        forecast_payload = _batch_prediction_forecasts_for_user(
+            db,
+            user_id,
+            batch.id,
+            selected_building_id,
+        )
 
     return {
         "batch": _history_item_from_batch(batch),
@@ -582,24 +592,7 @@ def list_upload_history(db: Session, user_id: int) -> list[dict[str, object]]:
         .limit(20)
         .all()
     )
-    items = [_history_item_from_batch(row) for row in rows]
-
-    # Keep history concise by collapsing accidental duplicate uploads of the same file/day payload summary.
-    unique: list[dict[str, object]] = []
-    seen: set[tuple[object, ...]] = set()
-    for item in items:
-        key = (
-            item["source_filename"],
-            item["batch_date"],
-            item["record_count"],
-            item["total_kwh"],
-            item["previous_total_kwh"],
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(item)
-    return unique
+    return [_history_item_from_batch(row) for row in rows]
 
 
 def get_latest_upload_report(db: Session, user_id: int) -> dict[str, object] | None:

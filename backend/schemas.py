@@ -83,8 +83,10 @@ class PredictionOut(BaseModel):
     id: int
     building_id: int
     building_name: str
+    source_batch_id: Optional[int] = None
     meter: int
     predicted_energy: float
+    prediction_for_date: Optional[date] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
