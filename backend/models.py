@@ -28,6 +28,7 @@ class Building(Base):
     campus_aliases = relationship("CampusBuildingAlias", back_populates="building", cascade="all, delete-orphan")
     uploaded_readings = relationship("CampusUploadedReading", back_populates="building")
     upload_forecasts = relationship("CampusUploadForecast", back_populates="building")
+    custom_devices = relationship("BuildingCustomDevice", back_populates="building", cascade="all, delete-orphan")
 
 
 class BuildingInventory(Base):
@@ -65,6 +66,21 @@ class BuildingDeviceConfig(Base):
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     building = relationship("Building", back_populates="device_config")
+
+
+class BuildingCustomDevice(Base):
+    __tablename__ = "building_custom_devices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    building_id = Column(Integer, ForeignKey("buildings.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(120), nullable=False)
+    count = Column(Integer, nullable=False, default=1)
+    wattage = Column(Float, nullable=False, default=100.0)
+    runtime_hours = Column(Float, nullable=False, default=8.0)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    building = relationship("Building", back_populates="custom_devices")
 
 
 class EnergyReading(Base):

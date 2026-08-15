@@ -1,10 +1,9 @@
 import { useCampusData } from '../context/CampusDataContext';
 
-const navItems = ['Home', 'Dashboard', 'Energy', 'Buildings', 'Prediction', 'Alerts', 'Admin', 'Settings'];
+const navItems = ['Home', 'Energy', 'Buildings', 'Prediction', 'Alerts', 'Admin', 'Settings'];
 
 const iconMap = {
   Home: '◉',
-  Dashboard: '▣',
   Energy: '⚡',
   Buildings: '⌂',
   Prediction: '✦',

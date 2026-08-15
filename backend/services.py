@@ -128,6 +128,28 @@ def get_energy_trend(db: Session, user_id: int) -> list[TrendPoint]:
     return trend
 
 
+def _format_stale_duration(age_seconds: int) -> str:
+    if age_seconds < 60:
+        return "Latest meter reading is less than a minute old"
+
+    minutes = age_seconds // 60
+    if minutes < 60:
+        return f"Latest meter reading is {minutes} minute{'s' if minutes != 1 else ''} old"
+
+    hours = minutes // 60
+    rem_minutes = minutes % 60
+    if hours < 24:
+        if rem_minutes == 0:
+            return f"Latest meter reading is {hours} hour{'s' if hours != 1 else ''} old"
+        return f"Latest meter reading is {hours} hour{'s' if hours != 1 else ''} {rem_minutes} minute{'s' if rem_minutes != 1 else ''} old"
+
+    days = hours // 24
+    rem_hours = hours % 24
+    if rem_hours == 0:
+        return f"Latest meter reading is {days} day{'s' if days != 1 else ''} old"
+    return f"Latest meter reading is {days} day{'s' if days != 1 else ''} {rem_hours} hour{'s' if rem_hours != 1 else ''} old"
+
+
 def build_alerts(db: Session, user_id: int) -> list[AlertOut]:
     buildings = _user_buildings(db, user_id)
     if not buildings:
@@ -143,25 +165,33 @@ def build_alerts(db: Session, user_id: int) -> list[AlertOut]:
             alerts.append(
                 AlertOut(
                     id=f"missing-{building.id}",
+                    building_id=building.id,
                     building_name=building.name,
                     title="Telemetry missing",
-                    message="No live meter reading available for this building",
+                    message="No meter data available",
                     priority="high",
                     status="open",
+                    recorded_at=None,
                 )
             )
             continue
 
-        age_minutes = max(0, int((now - reading.recorded_at).total_seconds() // 60))
-        if age_minutes > 45:
+        recorded_at = reading.recorded_at
+        if recorded_at.tzinfo is None:
+            recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+
+        age_seconds = max(0, int((now - recorded_at).total_seconds()))
+        if age_seconds > 3600:
             alerts.append(
                 AlertOut(
                     id=f"stale-{building.id}",
+                    building_id=building.id,
                     building_name=building.name,
                     title="Stale telemetry",
-                    message=f"Latest meter reading is {age_minutes} minutes old",
+                    message=_format_stale_duration(age_seconds),
                     priority="high",
                     status="open",
+                    recorded_at=recorded_at,
                 )
             )
 
@@ -169,22 +199,26 @@ def build_alerts(db: Session, user_id: int) -> list[AlertOut]:
             alerts.append(
                 AlertOut(
                     id=f"spike-{building.id}",
+                    building_id=building.id,
                     building_name=building.name,
                     title="High consumption",
                     message=f"Live meter reading {reading.meter_reading:.0f} kWh exceeds threshold",
                     priority="high",
                     status="open",
+                    recorded_at=recorded_at,
                 )
             )
         elif reading.meter_reading > 12000:
             alerts.append(
                 AlertOut(
                     id=f"watch-load-{building.id}",
+                    building_id=building.id,
                     building_name=building.name,
                     title="Rising load",
                     message=f"Live meter reading {reading.meter_reading:.0f} kWh is approaching high-load threshold",
                     priority="info",
                     status="open",
+                    recorded_at=recorded_at,
                 )
             )
 
@@ -192,11 +226,13 @@ def build_alerts(db: Session, user_id: int) -> list[AlertOut]:
             alerts.append(
                 AlertOut(
                     id=f"watch-{building.id}",
+                    building_id=building.id,
                     building_name=building.name,
                     title="Monitoring required",
                     message=building.description or "Building is currently in watch status",
                     priority="info",
                     status="open",
+                    recorded_at=recorded_at,
                 )
             )
 

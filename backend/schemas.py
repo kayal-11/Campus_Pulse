@@ -57,6 +57,33 @@ class BuildingDeviceConfigOut(BuildingDeviceConfigIn):
     model_config = {"from_attributes": True}
 
 
+class CustomDeviceCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    count: int = Field(default=1, ge=0)
+    wattage: float = Field(default=100.0, ge=0)
+    runtime_hours: float = Field(default=8.0, ge=0, le=24)
+
+
+class CustomDeviceUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=120)
+    count: Optional[int] = Field(None, ge=0)
+    wattage: Optional[float] = Field(None, ge=0)
+    runtime_hours: Optional[float] = Field(None, ge=0, le=24)
+
+
+class CustomDeviceOut(BaseModel):
+    id: int
+    building_id: int
+    name: str
+    count: int
+    wattage: float
+    runtime_hours: float
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class BuildingOut(BaseModel):
     id: int
     name: str
@@ -66,6 +93,14 @@ class BuildingOut(BaseModel):
     latest_reading: Optional[float] = None
 
     model_config = {"from_attributes": True}
+
+
+class ManualMeterReadingIn(BaseModel):
+    building_id: Optional[int] = None
+    building_name: str
+    date: date
+    time: time
+    meter_reading: float = Field(..., ge=0)
 
 
 class EnergyReadingOut(BaseModel):
@@ -151,6 +186,8 @@ class AlertOut(BaseModel):
     message: str
     priority: str
     status: str
+    building_id: Optional[int] = None
+    recorded_at: Optional[datetime] = None
 
 
 class CampusUploadComparisonOut(BaseModel):

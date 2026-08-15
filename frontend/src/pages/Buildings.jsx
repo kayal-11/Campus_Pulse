@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import Chart from '../components/Chart';
 import { useCampusData } from '../context/CampusDataContext';
-import { fetchBuildingDeviceConfig, fetchBuildingInventory, updateBuildingDeviceConfig } from '../services/api';
+import { fetchBuildingCustomDevices, fetchBuildingDeviceConfig, fetchBuildingInventory, updateBuildingDeviceConfig } from '../services/api';
 
 const DEVICE_PROFILES = [
   {
@@ -51,7 +51,7 @@ const DEVICE_PROFILES = [
   },
 ];
 
-const TARIFF_PER_KWH = 0.14;
+const TARIFF_PER_KWH = 8.25;
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
@@ -102,7 +102,7 @@ function sanitizeNumber(value, fallback = 0) {
   return Math.max(0, parsed);
 }
 
-function buildEstimatedDeviceModel(building, deviceInputs, latestBuildingEnergyKwh, inventoryCounts) {
+function buildEstimatedDeviceModel(building, deviceInputs, latestBuildingEnergyKwh, inventoryCounts, customDevicesList = []) {
   const seedBase = Number(building.id) || building.name.length || 1;
   const statusFactor =
     String(building.status).toLowerCase() === 'watch'
@@ -112,7 +112,7 @@ function buildEstimatedDeviceModel(building, deviceInputs, latestBuildingEnergyK
         : 0.03;
   const occupancy = clamp(0.44 + deterministicFactor(seedBase, 1) * 0.42 + statusFactor, 0.3, 0.95);
 
-  const rowsWithDailyEnergy = DEVICE_PROFILES.map((device) => {
+  const standardRows = DEVICE_PROFILES.map((device) => {
     const configured = deviceInputs[device.key] || {};
     const count = sanitizeNumber(inventoryCounts[device.key], 0);
     const wattage = sanitizeNumber(configured.wattage, device.defaultWattage);
@@ -126,51 +126,146 @@ function buildEstimatedDeviceModel(building, deviceInputs, latestBuildingEnergyK
       runtimeHours,
       estimatedKwh,
       estimatedSavingsPerHourKwh: (count * wattage) / 1000,
+      isCustom: false,
     };
   });
+
+  const customRows = (customDevicesList || []).map((cd) => {
+    const configured = deviceInputs[`custom_${cd.id}`] || {};
+    const count = sanitizeNumber(cd.count, 0);
+    const wattage = sanitizeNumber(configured.wattage ?? cd.wattage, 100);
+    const runtimeHours = sanitizeNumber(configured.runtimeHours ?? cd.runtime_hours, 8);
+    const estimatedKwh = (count * wattage * runtimeHours) / 1000;
+    return {
+      key: `custom_${cd.id}`,
+      category: cd.name,
+      count,
+      wattage,
+      runtimeHours,
+      estimatedKwh,
+      estimatedSavingsPerHourKwh: (count * wattage) / 1000,
+      isCustom: true,
+      id: cd.id,
+    };
+  });
+
+  const rowsWithDailyEnergy = [...standardRows, ...customRows];
 
   const totalEstimatedKwh = rowsWithDailyEnergy.reduce((sum, row) => sum + row.estimatedKwh, 0);
   const referenceTotalKwh = Math.max(0, Number(latestBuildingEnergyKwh) || 0);
   const scalingFactor = totalEstimatedKwh > 0 && referenceTotalKwh > 0 ? referenceTotalKwh / totalEstimatedKwh : 0;
 
-  const rows = rowsWithDailyEnergy.map((row) => ({
-    ...row,
-    normalizedKwh: row.estimatedKwh * scalingFactor,
-    percentage: referenceTotalKwh > 0 ? ((row.estimatedKwh * scalingFactor) / referenceTotalKwh) * 100 : 0,
-    monthlyCost: row.estimatedKwh * scalingFactor * 30 * TARIFF_PER_KWH,
-  }));
+  const displayTotalKwh = referenceTotalKwh > 0 ? referenceTotalKwh : totalEstimatedKwh;
+
+  const rows = rowsWithDailyEnergy.map((row) => {
+    const normalizedKwh = referenceTotalKwh > 0 && scalingFactor > 0 ? row.estimatedKwh * scalingFactor : row.estimatedKwh;
+    const percentage = totalEstimatedKwh > 0 ? (row.estimatedKwh / totalEstimatedKwh) * 100 : 0;
+    const monthlyCost = normalizedKwh * 30 * TARIFF_PER_KWH;
+    return {
+      ...row,
+      normalizedKwh,
+      percentage,
+      monthlyCost,
+    };
+  });
 
   const sortedByUse = [...rows].sort((a, b) => b.normalizedKwh - a.normalizedKwh);
   const top = sortedByUse[0];
   const second = sortedByUse[1];
+  const acs = rows.find((row) => row.key === 'acs');
+  const lab = rows.find((row) => row.key === 'lab');
   const lights = rows.find((row) => row.key === 'lights');
 
-  const aiInsights = [
-    top
-      ? `${top.category} contribute ${top.percentage.toFixed(1)}% of the estimated device energy.`
-      : 'Insufficient data for contributor analysis.',
-    `Latest historical building energy is ${referenceTotalKwh.toFixed(1)} kWh/day; device estimates are normalized to match.`,
-    second
-      ? `${second.category} are the second-largest load at ${second.normalizedKwh.toFixed(1)} kWh/day.`
-      : 'Secondary load insight is unavailable.',
-  ];
+  // Dynamic Estimation Insights
+  const aiInsights = [];
 
-  const recommendations = [
-    top
-      ? `Reduce ${top.category} operating hours by 1 hour to save about ${top.estimatedSavingsPerHourKwh.toFixed(1)} kWh/day (${(top.estimatedSavingsPerHourKwh * TARIFF_PER_KWH * 30).toFixed(0)} USD/month).`
-      : 'Collect a full day of meter data to generate recommendations.',
-    second
-      ? `Shift 10% of ${second.category} operation away from peak periods to reduce cooling and demand overlap.`
-      : 'Add a second major load profile to improve recommendations.',
-    lights
-      ? `Apply occupancy-driven lighting schedules to trim up to ${(lights.normalizedKwh * 0.12).toFixed(1)} kWh/day from lighting consumption.`
-      : 'Lighting control recommendation unavailable.',
-  ];
+  if (top && top.normalizedKwh > 0) {
+    aiInsights.push(
+      `${top.category} is the top energy contributor in ${building.name}, accounting for ${top.percentage.toFixed(1)}% (${top.normalizedKwh.toFixed(1)} kWh/day) of total estimated device energy.`
+    );
+  } else {
+    aiInsights.push(`No active device energy consumption calculated for ${building.name}.`);
+  }
+
+  if (referenceTotalKwh > 0) {
+    aiInsights.push(
+      `Latest actual building energy from DB is ${referenceTotalKwh.toFixed(1)} kWh/day; device estimates are scaled dynamically to match.`
+    );
+  } else if (totalEstimatedKwh > 0) {
+    aiInsights.push(
+      `Total estimated device energy for ${building.name} is ${totalEstimatedKwh.toFixed(1)} kWh/day (awaiting latest meter upload in DB).`
+    );
+  } else {
+    aiInsights.push(`No historical meter readings or device inventory available for ${building.name}.`);
+  }
+
+  if (second && second.normalizedKwh > 0) {
+    aiInsights.push(
+      `${second.category} is the second-largest load at ${second.percentage.toFixed(1)}% (${second.normalizedKwh.toFixed(1)} kWh/day).`
+    );
+  } else if (top && top.normalizedKwh > 0) {
+    aiInsights.push(`All calculated device energy is concentrated in ${top.category}.`);
+  } else {
+    aiInsights.push(`Secondary load insights unavailable due to missing device inventory.`);
+  }
+
+  // Dynamic Recommended Actions: AC, Lab Equipment, Lighting, and Custom Devices
+  const recommendations = [];
+
+  // 1. AC Recommendation
+  if (acs && acs.count > 0 && acs.wattage > 0 && acs.runtimeHours > 0) {
+    const acHourlySavingsKwh = (acs.count * acs.wattage * 1) / 1000;
+    const acMonthlySavingsInr = acHourlySavingsKwh * 30 * TARIFF_PER_KWH;
+    recommendations.push(
+      `ACs: Reduce operating hours by 1 hour/day to save about ${acHourlySavingsKwh.toFixed(1)} kWh/day (₹${acMonthlySavingsInr.toFixed(0)}/month).`
+    );
+  } else if (acs && acs.count > 0) {
+    recommendations.push(`ACs: ${acs.count} unit(s) registered for ${building.name}. Update wattage and runtime to compute potential savings.`);
+  } else {
+    recommendations.push(`ACs: No active AC inventory recorded for ${building.name}.`);
+  }
+
+  // 2. Lab Equipment Recommendation
+  if (lab && lab.count > 0 && lab.wattage > 0 && lab.runtimeHours > 0) {
+    const hoursToReduce = Math.min(lab.runtimeHours, 1.5);
+    const labDailySavingsKwh = (lab.count * lab.wattage * hoursToReduce) / 1000;
+    const labMonthlySavingsInr = labDailySavingsKwh * 30 * TARIFF_PER_KWH;
+    recommendations.push(
+      `Lab Equipment: Power down idle equipment during off-peak hours to save about ${labDailySavingsKwh.toFixed(1)} kWh/day (₹${labMonthlySavingsInr.toFixed(0)}/month).`
+    );
+  } else if (lab && lab.count > 0) {
+    recommendations.push(`Lab Equipment: ${lab.count} item(s) logged. Configure power and operating hours to generate savings recommendations.`);
+  } else {
+    recommendations.push(`Lab Equipment: No lab equipment logged in inventory for ${building.name}.`);
+  }
+
+  // 3. Lighting Recommendation
+  if (lights && lights.count > 0 && lights.wattage > 0 && lights.runtimeHours > 0) {
+    const hoursToReduce = Math.min(lights.runtimeHours, 2);
+    const lightsDailySavingsKwh = (lights.count * lights.wattage * hoursToReduce) / 1000;
+    const lightsMonthlySavingsInr = lightsDailySavingsKwh * 30 * TARIFF_PER_KWH;
+    recommendations.push(
+      `Lighting: Implement occupancy sensors and daylight scheduling to save about ${lightsDailySavingsKwh.toFixed(1)} kWh/day (₹${lightsMonthlySavingsInr.toFixed(0)}/month).`
+    );
+  } else if (lights && lights.count > 0) {
+    recommendations.push(`Lighting: ${lights.count} fixture(s) present. Set wattage and hours to view dynamic lighting savings.`);
+  } else {
+    recommendations.push(`Lighting: No lighting fixtures logged in inventory for ${building.name}.`);
+  }
+
+  // 4. Custom Top Contributor Recommendation (if top load is a custom device)
+  if (top && top.isCustom && top.count > 0 && top.wattage > 0 && top.runtimeHours > 0) {
+    const customSavingsKwh = (top.count * top.wattage * 1) / 1000;
+    const customSavingsInr = customSavingsKwh * 30 * TARIFF_PER_KWH;
+    recommendations.push(
+      `${top.category}: As a major contributor, reducing operating hours by 1 hour/day saves about ${customSavingsKwh.toFixed(1)} kWh/day (₹${customSavingsInr.toFixed(0)}/month).`
+    );
+  }
 
   return {
     occupancy,
     rows,
-    totalKwh: referenceTotalKwh,
+    totalKwh: displayTotalKwh,
     rawEstimatedTotalKwh: totalEstimatedKwh,
     scalingFactor,
     tariffPerKwh: TARIFF_PER_KWH,
@@ -184,6 +279,7 @@ function Buildings() {
   const [selectedBuildingId, setSelectedBuildingId] = useState(null);
   const [deviceInputsByBuilding, setDeviceInputsByBuilding] = useState({});
   const [inventoryByBuilding, setInventoryByBuilding] = useState({});
+  const [customDevicesByBuilding, setCustomDevicesByBuilding] = useState({});
   const [configLoadingByBuilding, setConfigLoadingByBuilding] = useState({});
   const [saveState, setSaveState] = useState({ status: '', message: '' });
 
@@ -262,18 +358,54 @@ function Buildings() {
     };
 
     loadInventory();
-    const interval = setInterval(loadInventory, 30000);
+    const interval = setInterval(loadInventory, 5000);
 
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [selectedBuilding?.id]);
+  }, [selectedBuilding?.id, buildings]);
+
+  useEffect(() => {
+    if (!selectedBuilding?.id) return undefined;
+
+    let cancelled = false;
+
+    const loadCustom = async () => {
+      try {
+        const list = await fetchBuildingCustomDevices(selectedBuilding.id);
+        if (cancelled) return;
+        setCustomDevicesByBuilding((prev) => ({
+          ...prev,
+          [selectedBuilding.id]: list || [],
+        }));
+      } catch {
+        if (cancelled) return;
+        setCustomDevicesByBuilding((prev) => ({
+          ...prev,
+          [selectedBuilding.id]: [],
+        }));
+      }
+    };
+
+    loadCustom();
+    const interval = setInterval(loadCustom, 5000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [selectedBuilding?.id, buildings]);
 
   const selectedInventoryCounts = useMemo(() => {
     if (!selectedBuilding) return null;
     return inventoryByBuilding[selectedBuilding.id] || buildDefaultInventoryCounts();
   }, [inventoryByBuilding, selectedBuilding]);
+
+  const selectedCustomDevices = useMemo(() => {
+    if (!selectedBuilding) return [];
+    return customDevicesByBuilding[selectedBuilding.id] || [];
+  }, [customDevicesByBuilding, selectedBuilding]);
 
   const latestHistoricalEnergyKwh = useMemo(() => {
     if (!selectedBuilding) return 0;
@@ -282,8 +414,14 @@ function Buildings() {
 
   const deviceModel = useMemo(() => {
     if (!selectedBuilding || !selectedDeviceInputs || !selectedInventoryCounts) return null;
-    return buildEstimatedDeviceModel(selectedBuilding, selectedDeviceInputs, latestHistoricalEnergyKwh, selectedInventoryCounts);
-  }, [selectedBuilding, selectedDeviceInputs, latestHistoricalEnergyKwh, selectedInventoryCounts]);
+    return buildEstimatedDeviceModel(
+      selectedBuilding,
+      selectedDeviceInputs,
+      latestHistoricalEnergyKwh,
+      selectedInventoryCounts,
+      selectedCustomDevices
+    );
+  }, [selectedBuilding, selectedDeviceInputs, latestHistoricalEnergyKwh, selectedInventoryCounts, selectedCustomDevices]);
 
   if (!buildings.length) {
     return (
@@ -394,7 +532,7 @@ function Buildings() {
             </div>
             <div>
               <span>Tariff Model</span>
-              <strong>{deviceModel.tariffPerKwh.toFixed(2)} USD/kWh</strong>
+              <strong>Tariff Rate: ₹{deviceModel.tariffPerKwh.toFixed(2)}/kWh</strong>
             </div>
           </div>
         </section>
@@ -433,7 +571,7 @@ function Buildings() {
                     <th>Avg Hours</th>
                     <th>Estimated kWh/day</th>
                     <th>Share (%)</th>
-                    <th>Monthly Cost</th>
+                    <th>Monthly Cost (₹)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -446,7 +584,7 @@ function Buildings() {
                           type="number"
                           min="0"
                           step="1"
-                          value={selectedDeviceInputs[row.key]?.wattage ?? 0}
+                          value={selectedDeviceInputs[row.key]?.wattage ?? row.wattage}
                           onChange={(event) => updateDeviceInput(row.key, 'wattage', event.target.value)}
                         />
                       </td>
@@ -455,13 +593,13 @@ function Buildings() {
                           type="number"
                           min="0"
                           step="0.1"
-                          value={selectedDeviceInputs[row.key]?.runtimeHours ?? 0}
+                          value={selectedDeviceInputs[row.key]?.runtimeHours ?? row.runtimeHours}
                           onChange={(event) => updateDeviceInput(row.key, 'runtimeHours', event.target.value)}
                         />
                       </td>
                       <td>{row.normalizedKwh.toFixed(1)}</td>
                       <td>{row.percentage.toFixed(1)}%</td>
-                      <td>{row.monthlyCost.toFixed(0)} USD</td>
+                      <td>₹{Math.round(row.monthlyCost).toLocaleString('en-IN')}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -499,18 +637,7 @@ function Buildings() {
             </section>
           </div>
 
-          <section className="device-wireframe">
-            <h4>Wireframe</h4>
-            <pre>{`+--------------------------------------------------------------+
-| Building Header: Name | Total kWh/day | Occupancy | Tariff |
---------------------------------------------------------------+
-| Device Inventory Table                      | Donut/Pie Chart |
-| Device | Count | W | Hours | kWh | %                        |
-| Monthly Cost per Category                                |   |
-+--------------------------------------------------------------+
-| Estimation Insights                  | Recommended Actions   |
-+--------------------------------------------------------------+`}</pre>
-          </section>
+
         </section>
       </section>
     </div>

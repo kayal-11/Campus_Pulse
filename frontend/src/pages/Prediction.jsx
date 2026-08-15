@@ -1,3 +1,4 @@
+import { useState, useMemo } from 'react';
 import Card from '../components/Card';
 import { useCampusData } from '../context/CampusDataContext';
 
@@ -50,79 +51,102 @@ function getStatusMeta(risk) {
   return { text: 'Stable', className: 'status-badge--stable' };
 }
 
-function getRecommendationSet(predictedEnergy) {
-  if (predictedEnergy > 18000) {
-    return [
-      {
-        title: 'HVAC optimization',
-        impact: 'Critical',
-        savings: '15–20%',
-        detail: 'Reduce cooling and ventilation loads during peak demand windows.',
-      },
-      {
-        title: 'Lighting control',
-        impact: 'High',
-        savings: '8–12%',
-        detail: 'Dim non-essential lighting in common areas and corridors.',
-      },
-      {
-        title: 'Equipment scheduling',
-        impact: 'High',
-        savings: '6–10%',
-        detail: 'Shift heavy equipment usage to off-peak hours.',
-      },
-      {
-        title: 'Peak-load management',
-        impact: 'High',
-        savings: '5–8%',
-        detail: 'Stagger energy-intensive activities to reduce demand spikes.',
-      },
-    ];
+const TARIFF_PER_KWH = 8.25;
+
+function getDynamicRecommendationSet(prediction, buildingData, historicalAvgKwh = 1000) {
+  if (!prediction || !prediction.predicted_energy || Number(prediction.predicted_energy) <= 0) {
+    return [];
   }
 
-  if (predictedEnergy > 12000) {
-    return [
-      {
-        title: 'Tune HVAC schedules',
-        impact: 'Medium',
-        savings: '8–12%',
-        detail: 'Adjust temperature setpoints and occupancy-based controls.',
-      },
-      {
-        title: 'Reduce idle equipment',
-        impact: 'Medium',
-        savings: '5–8%',
-        detail: 'Turn off non-critical devices outside operational hours.',
-      },
-      {
-        title: 'Shift loads to off-peak hours',
-        impact: 'Medium',
-        savings: '3–6%',
-        detail: 'Reschedule significant demand tasks to lower-cost periods.',
-      },
-    ];
+  const predictedEnergy = Number(prediction.predicted_energy) || 0;
+  const buildingName = prediction.building_name || buildingData?.name || 'Selected Building';
+  const baselineEnergy = Math.max(100, Number(historicalAvgKwh) || 1000);
+  const ratio = predictedEnergy / baselineEnergy;
+
+  // Determine severity dynamically: Low / Medium / High / Critical
+  let severity = 'Low';
+  if (predictedEnergy > 1800 || ratio >= 1.35) {
+    severity = 'Critical';
+  } else if (predictedEnergy > 1000 || ratio >= 1.15) {
+    severity = 'High';
+  } else if (predictedEnergy > 500 || ratio >= 0.95) {
+    severity = 'Medium';
   }
 
-  return [
-    {
-      title: 'Fine-tune ventilation',
-      impact: 'Low',
-      savings: '2–4%',
-      detail: 'Lower unnecessary ventilation during low-occupancy periods.',
-    },
-    {
-      title: 'Review standby loads',
-      impact: 'Low',
-      savings: '1–3%',
-      detail: 'Check for equipment left running after standard operating hours.',
-    },
-    {
-      title: 'Optimize lighting',
-      impact: 'Low',
-      savings: '1–2%',
-      detail: 'Align lighting schedules with actual occupancy patterns.',
-    },
-  ];
+  const recommendations = [];
+
+  // 1. AC / HVAC Optimization
+  const acPct = severity === 'Critical' ? 0.16 : severity === 'High' ? 0.12 : severity === 'Medium' ? 0.08 : 0.04;
+  const acSavingsKwh = predictedEnergy * acPct;
+  const acSavingsPct = (acSavingsKwh / predictedEnergy) * 100;
+  const acMonthlySavingsInr = acSavingsKwh * 30 * TARIFF_PER_KWH;
+  const acImpact = severity === 'Critical' ? 'Critical' : severity === 'High' ? 'High' : 'Medium';
+
+  recommendations.push({
+    title: severity === 'Critical' || severity === 'High' ? 'HVAC & cooling optimization' : 'Tune HVAC schedules',
+    impact: acImpact,
+    savings: `${formatKwh(acSavingsKwh)}/day (${acSavingsPct.toFixed(1)}% of forecast • ₹${acMonthlySavingsInr.toFixed(0)}/month)`,
+    detail: `Predicted demand of ${formatKwh(predictedEnergy)} for ${buildingName} indicates peak cooling load. Adjust thermostat setpoints +2°C and optimize runtime.`,
+  });
+
+  // 2. Ventilation Control
+  const ventPct = severity === 'Critical' ? 0.09 : severity === 'High' ? 0.07 : severity === 'Medium' ? 0.05 : 0.03;
+  const ventSavingsKwh = predictedEnergy * ventPct;
+  const ventSavingsPct = (ventSavingsKwh / predictedEnergy) * 100;
+  const ventMonthlySavingsInr = ventSavingsKwh * 30 * TARIFF_PER_KWH;
+  const ventImpact = severity === 'Critical' ? 'High' : severity === 'High' || severity === 'Medium' ? 'Medium' : 'Low';
+
+  recommendations.push({
+    title: 'Optimize ventilation airflow',
+    impact: ventImpact,
+    savings: `${formatKwh(ventSavingsKwh)}/day (${ventSavingsPct.toFixed(1)}% of forecast • ₹${ventMonthlySavingsInr.toFixed(0)}/month)`,
+    detail: `Reschedule VAV fan airflow and operating hours to match predicted occupancy dips in ${buildingName}.`,
+  });
+
+  // 3. Standby-Load Management
+  const standbyPct = severity === 'Critical' ? 0.07 : severity === 'High' ? 0.06 : severity === 'Medium' ? 0.04 : 0.025;
+  const standbySavingsKwh = predictedEnergy * standbyPct;
+  const standbySavingsPct = (standbySavingsKwh / predictedEnergy) * 100;
+  const standbyMonthlySavingsInr = standbySavingsKwh * 30 * TARIFF_PER_KWH;
+  const standbyImpact = severity === 'Critical' || severity === 'High' ? 'High' : 'Medium';
+
+  recommendations.push({
+    title: 'Automate standby-load power down',
+    impact: standbyImpact,
+    savings: `${formatKwh(standbySavingsKwh)}/day (${standbySavingsPct.toFixed(1)}% of forecast • ₹${standbyMonthlySavingsInr.toFixed(0)}/month)`,
+    detail: `Enforce automated power-down for workstations and idle electronics in ${buildingName} outside operational hours.`,
+  });
+
+  // 4. Lighting Control
+  const lightPct = severity === 'Critical' ? 0.05 : severity === 'High' ? 0.04 : severity === 'Medium' ? 0.03 : 0.02;
+  const lightSavingsKwh = predictedEnergy * lightPct;
+  const lightSavingsPct = (lightSavingsKwh / predictedEnergy) * 100;
+  const lightMonthlySavingsInr = lightSavingsKwh * 30 * TARIFF_PER_KWH;
+  const lightImpact = severity === 'Critical' ? 'Medium' : 'Low';
+
+  recommendations.push({
+    title: 'Occupancy-driven lighting control',
+    impact: lightImpact,
+    savings: `${formatKwh(lightSavingsKwh)}/day (${lightSavingsPct.toFixed(1)}% of forecast • ₹${lightMonthlySavingsInr.toFixed(0)}/month)`,
+    detail: `Implement motion sensors and dim corridor/common lighting in ${buildingName} during low-demand windows.`,
+  });
+
+  // 5. Peak Demand Load Shifting (for Critical or High severity)
+  if (severity === 'Critical' || severity === 'High') {
+    const peakSavingsKwh = predictedEnergy * 0.08;
+    const peakSavingsPct = (peakSavingsKwh / predictedEnergy) * 100;
+    const peakMonthlySavingsInr = peakSavingsKwh * 30 * TARIFF_PER_KWH;
+    const excessPct = Math.max(10, Math.round((ratio - 1) * 100));
+
+    recommendations.push({
+      title: 'Peak demand load-shifting',
+      impact: 'Critical',
+      savings: `${formatKwh(peakSavingsKwh)}/day (${peakSavingsPct.toFixed(1)}% of forecast • ₹${peakMonthlySavingsInr.toFixed(0)}/month)`,
+      detail: `Forecast for ${buildingName} exceeds baseline load by ~${excessPct}%. Stagger energy-intensive equipment to prevent peak surcharges.`,
+    });
+  }
+
+  return recommendations;
 }
 
 function PredictionChart({ title, description, data, type = 'line' }) {
@@ -320,7 +344,8 @@ function PredictionChart({ title, description, data, type = 'line' }) {
 }
 
 function Prediction() {
-  const { predictions, overview, loading } = useCampusData();
+  const { predictions, overview, buildings = [], loading } = useCampusData();
+  const [selectedBuildingId, setSelectedBuildingId] = useState('all');
 
   const sortedPredictions = [...predictions].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   const latestPrediction = sortedPredictions[0] || null;
@@ -341,7 +366,33 @@ function Prediction() {
   const riskBuildings = latestBuildingPredictions.filter((prediction) => prediction.predicted_energy > 1000).length;
   const rankedBuildings = latestBuildingPredictions.slice(0, 6);
   const latestRisk = latestPrediction ? getRiskLevel(latestPrediction.predicted_energy) : 'Low';
-  const recommendations = latestPrediction ? getRecommendationSet(latestPrediction.predicted_energy) : [];
+
+  const selectedBuildingPrediction = useMemo(() => {
+    if (selectedBuildingId === 'all') return latestPrediction;
+    return (
+      latestPredictionsByBuilding.get(Number(selectedBuildingId)) ||
+      latestPredictionsByBuilding.get(String(selectedBuildingId)) ||
+      latestPrediction
+    );
+  }, [selectedBuildingId, latestPrediction, latestPredictionsByBuilding]);
+
+  const targetBuildingObj = useMemo(() => {
+    if (!selectedBuildingPrediction) return null;
+    return (
+      buildings.find(
+        (b) => b.id === selectedBuildingPrediction.building_id || b.name === selectedBuildingPrediction.building_name
+      ) || null
+    );
+  }, [buildings, selectedBuildingPrediction]);
+
+  const recommendations = useMemo(() => {
+    if (!selectedBuildingPrediction) return [];
+    return getDynamicRecommendationSet(
+      selectedBuildingPrediction,
+      targetBuildingObj,
+      targetBuildingObj?.latest_reading || 1000
+    );
+  }, [selectedBuildingPrediction, targetBuildingObj]);
   const confidenceNote = 'Prediction generated using the trained Random Forest model.';
 
   const trendData = sortedPredictions.slice(0, 8).reverse().map((prediction) => ({
@@ -473,36 +524,77 @@ function Prediction() {
       </div>
 
       <section className="prediction-card" title="AI recommendations based on current forecast severity">
-        <div className="prediction-section-title">
+        <div className="prediction-section-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
           <div>
             <p className="card-title">AI recommendations</p>
             <h3>Dynamic actions driven by forecast severity</h3>
-            <p className="card-detail">Suggestions are generated from the latest prediction level and updated as new forecasts arrive.</p>
+            <p className="card-detail">
+              {selectedBuildingPrediction
+                ? `Suggestions generated for ${selectedBuildingPrediction.building_name || 'selected building'} based on forecasted load of ${formatKwh(selectedBuildingPrediction.predicted_energy)}.`
+                : 'Suggestions are generated from the latest prediction level and updated as new forecasts arrive.'}
+            </p>
           </div>
-          <span className="pill">Smart</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            {buildings && buildings.length > 0 && (
+              <select
+                value={selectedBuildingId}
+                onChange={(e) => setSelectedBuildingId(e.target.value)}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '8px',
+                  border: '1px solid var(--border-color, #cbd5e1)',
+                  background: 'var(--card-bg, #ffffff)',
+                  color: 'inherit',
+                  fontSize: '0.85rem',
+                  fontWeight: '500',
+                  cursor: 'pointer',
+                }}
+              >
+                <option value="all">All Buildings (Latest)</option>
+                {buildings.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            <span className="pill">Smart</span>
+          </div>
         </div>
-        <div className="recommendations-grid">
-          {recommendations.map((item) => {
-            const impactClass = getImpactClass(item.impact);
-            const impactIcon = impactClass === 'high' ? '⚠' : impactClass === 'medium' ? '▲' : '✓';
-            return (
-              <article key={item.title} className="recommendation-card">
-                <div className="recommendation-card__header">
-                  <strong>{item.title}</strong>
-                  <span className={`impact-badge impact-badge--${impactClass}`}>
-                    <span className="impact-icon">{impactIcon}</span>
-                    {item.impact}
+
+        {recommendations.length > 0 ? (
+          <div className="recommendations-grid">
+            {recommendations.map((item) => {
+              const impactClass = getImpactClass(item.impact);
+              const impactIcon = impactClass === 'high' ? '⚠' : impactClass === 'medium' ? '▲' : '✓';
+              return (
+                <article key={item.title} className="recommendation-card">
+                  <div className="recommendation-card__header">
+                    <strong>{item.title}</strong>
+                    <span className={`impact-badge impact-badge--${impactClass}`}>
+                      <span className="impact-icon">{impactIcon}</span>
+                      {item.impact}
+                    </span>
+                  </div>
+                  <p>{item.detail}</p>
+                  <span className="recommendation-card__footer">
+                    <span className="savings-icon">↗</span>
+                    Estimated savings: {item.savings}
                   </span>
-                </div>
-                <p>{item.detail}</p>
-                <span className="recommendation-card__footer">
-                  <span className="savings-icon">↗</span>
-                  Estimated savings: {item.savings}
-                </span>
-              </article>
-            );
-          })}
-        </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="prediction-card--empty-recommendations" style={{ padding: '2.5rem 1rem', textAlign: 'center', color: '#64748b' }}>
+            <p style={{ fontSize: '1.05rem', fontWeight: 600, margin: '0 0 0.5rem 0', color: '#334155' }}>
+              Insufficient data for recommendations
+            </p>
+            <p style={{ fontSize: '0.88rem', margin: 0 }}>
+              No prediction or valid forecast data available to generate dynamic recommendations for this building.
+            </p>
+          </div>
+        )}
       </section>
 
       <section className="prediction-card" title="Future forecast outlook and savings estimate">

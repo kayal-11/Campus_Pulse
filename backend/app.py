@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from auth import create_access_token, get_current_user, hash_password, verify_password
 from database import get_db
 from init_db import init_database
-from models import Building, BuildingDeviceConfig, BuildingInventory, CampusUploadBatch, CampusUploadedReading, EnergyReading, Prediction, User
+from models import Building, BuildingCustomDevice, BuildingDeviceConfig, BuildingInventory, CampusUploadBatch, CampusUploadedReading, EnergyReading, Prediction, User
 from realtime import manager
 from schemas import (
     AdminStats,
@@ -30,9 +30,13 @@ from schemas import (
     BuildingOut,
     CampusUploadHistoryItemOut,
     CampusUploadReportOut,
+    CustomDeviceCreate,
+    CustomDeviceOut,
+    CustomDeviceUpdate,
     DashboardOverview,
     EnergyInput,
     EnergyReadingOut,
+    ManualMeterReadingIn,
     PredictionOut,
     TrendPoint,
     UserLogin,
@@ -368,7 +372,7 @@ def get_building_inventory(
 
 
 @app.put("/api/buildings/{building_id}/inventory", response_model=BuildingInventoryOut)
-def update_building_inventory(
+async def update_building_inventory(
     building_id: int,
     payload: BuildingInventoryIn,
     db: Session = Depends(get_db),
@@ -395,7 +399,9 @@ def update_building_inventory(
 
     db.commit()
     db.refresh(inventory)
-    return BuildingInventoryOut.model_validate(inventory)
+    res = BuildingInventoryOut.model_validate(inventory)
+    await manager.broadcast("inventory_updated", {"building_id": building_id})
+    return res
 
 
 @app.get("/api/buildings/{building_id}/device-config", response_model=BuildingDeviceConfigOut)
@@ -417,7 +423,7 @@ def get_building_device_config(
 
 
 @app.put("/api/buildings/{building_id}/device-config", response_model=BuildingDeviceConfigOut)
-def update_building_device_config(
+async def update_building_device_config(
     building_id: int,
     payload: BuildingDeviceConfigIn,
     db: Session = Depends(get_db),
@@ -449,7 +455,116 @@ def update_building_device_config(
 
     db.commit()
     db.refresh(config)
-    return BuildingDeviceConfigOut.model_validate(config)
+    res = BuildingDeviceConfigOut.model_validate(config)
+    await manager.broadcast("device_config_updated", {"building_id": building_id})
+    return res
+
+
+# ── Custom Devices API ───────────────────────────────────────────────────────
+
+@app.get("/api/buildings/{building_id}/custom-devices", response_model=list[CustomDeviceOut])
+def list_building_custom_devices(
+    building_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    building = db.query(Building).filter(Building.id == building_id, Building.user_id == user.id).first()
+    if not building:
+        raise HTTPException(status_code=404, detail="Building not found")
+    devices = (
+        db.query(BuildingCustomDevice)
+        .filter(BuildingCustomDevice.building_id == building.id)
+        .order_by(BuildingCustomDevice.id.asc())
+        .all()
+    )
+    return [CustomDeviceOut.model_validate(d) for d in devices]
+
+
+@app.post("/api/buildings/{building_id}/custom-devices", response_model=CustomDeviceOut, status_code=201)
+async def create_building_custom_device(
+    building_id: int,
+    payload: CustomDeviceCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    building = db.query(Building).filter(Building.id == building_id, Building.user_id == user.id).first()
+    if not building:
+        raise HTTPException(status_code=404, detail="Building not found")
+
+    device = BuildingCustomDevice(
+        building_id=building.id,
+        name=payload.name.strip(),
+        count=payload.count,
+        wattage=payload.wattage,
+        runtime_hours=payload.runtime_hours,
+    )
+    db.add(device)
+    db.commit()
+    db.refresh(device)
+    res = CustomDeviceOut.model_validate(device)
+    await manager.broadcast("custom_device_updated", {"building_id": building.id, "action": "created"})
+    return res
+
+
+@app.put("/api/buildings/{building_id}/custom-devices/{device_id}", response_model=CustomDeviceOut)
+async def update_building_custom_device(
+    building_id: int,
+    device_id: int,
+    payload: CustomDeviceUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    building = db.query(Building).filter(Building.id == building_id, Building.user_id == user.id).first()
+    if not building:
+        raise HTTPException(status_code=404, detail="Building not found")
+
+    device = (
+        db.query(BuildingCustomDevice)
+        .filter(BuildingCustomDevice.id == device_id, BuildingCustomDevice.building_id == building.id)
+        .first()
+    )
+    if not device:
+        raise HTTPException(status_code=404, detail="Custom device not found")
+
+    if payload.name is not None:
+        device.name = payload.name.strip()
+    if payload.count is not None:
+        device.count = payload.count
+    if payload.wattage is not None:
+        device.wattage = payload.wattage
+    if payload.runtime_hours is not None:
+        device.runtime_hours = payload.runtime_hours
+
+    db.commit()
+    db.refresh(device)
+    res = CustomDeviceOut.model_validate(device)
+    await manager.broadcast("custom_device_updated", {"building_id": building.id, "action": "updated"})
+    return res
+
+
+@app.delete("/api/buildings/{building_id}/custom-devices/{device_id}", status_code=204)
+async def delete_building_custom_device(
+    building_id: int,
+    device_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    building = db.query(Building).filter(Building.id == building_id, Building.user_id == user.id).first()
+    if not building:
+        raise HTTPException(status_code=404, detail="Building not found")
+
+    device = (
+        db.query(BuildingCustomDevice)
+        .filter(BuildingCustomDevice.id == device_id, BuildingCustomDevice.building_id == building.id)
+        .first()
+    )
+    if not device:
+        raise HTTPException(status_code=404, detail="Custom device not found")
+
+    db.delete(device)
+    db.commit()
+    await manager.broadcast("custom_device_updated", {"building_id": building.id, "action": "deleted"})
+    return None
 
 
 # ── Energy API ───────────────────────────────────────────────────────────────
@@ -475,6 +590,73 @@ def get_energy_data(db: Session = Depends(get_db), user: User = Depends(get_curr
         )
         for r in rows
     ]
+
+
+@app.post("/api/energy/manual-reading", response_model=EnergyReadingOut, status_code=201)
+async def add_manual_meter_reading(
+    payload: ManualMeterReadingIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    name_clean = payload.building_name.strip()
+    if not name_clean:
+        raise HTTPException(status_code=400, detail="Building Name is required.")
+
+    meter_reading_val = round(float(payload.meter_reading), 2)
+    if meter_reading_val < 0:
+        raise HTTPException(status_code=400, detail="Meter reading (kWh) must be non-negative.")
+
+    date_str = payload.date.isoformat()
+    time_str = payload.time.strftime("%H:%M")
+    csv_content = f"Building Name,Date,Time,Meter Reading (kWh)\n{name_clean},{date_str},{time_str},{meter_reading_val}\n"
+    csv_bytes = csv_content.encode("utf-8")
+    filename = f"manual_{name_clean.replace(' ', '_')}_{date_str}_{payload.time.strftime('%H%M%S')}.csv"
+
+    try:
+        report = process_daily_upload(db, user, filename, csv_bytes, get_model())
+        batch_id = int(report["batch"]["id"])
+        try:
+            await run_ai_predictions(db, user)
+        except Exception:
+            pass
+        report = get_upload_report_detail(db, user.id, batch_id)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        db.rollback()
+        raise
+
+    building = (
+        db.query(Building)
+        .filter(Building.user_id == user.id, func.lower(Building.name) == name_clean.lower())
+        .first()
+    )
+    reading_dt = datetime.combine(payload.date, payload.time).replace(tzinfo=timezone.utc)
+
+    latest_energy = (
+        db.query(EnergyReading)
+        .filter(EnergyReading.building_id == building.id)
+        .order_by(EnergyReading.recorded_at.desc())
+        .first()
+        if building
+        else None
+    )
+
+    result = EnergyReadingOut(
+        id=latest_energy.id if latest_energy else (building.id if building else 0),
+        building_id=building.id if building else 0,
+        building_name=name_clean,
+        meter=latest_energy.meter if latest_energy else 0,
+        meter_reading=meter_reading_val,
+        recorded_at=reading_dt,
+    )
+
+    await manager.broadcast("daily_upload_processed", report)
+    await manager.broadcast("manual_reading_added", result.model_dump(mode="json"))
+    await manager.broadcast("energy_refreshed", {"building_id": building.id if building else 0, "refreshed_at": reading_dt.isoformat()})
+
+    return result
 
 
 @app.post("/api/energy/refresh")

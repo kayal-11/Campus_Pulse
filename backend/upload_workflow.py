@@ -151,8 +151,6 @@ def _parse_rows(filename: str, payload: bytes) -> tuple[date, list[dict[str, obj
 
     timestamps = working["_timestamp"].apply(_to_utc_timestamp)
     batch_dates = sorted({value.date() for value in timestamps})
-    if len(batch_dates) != 1:
-        raise ValueError("Upload one daily file at a time. Multiple dates were detected.")
 
     rows: list[dict[str, object]] = []
     for index, row in working.iterrows():

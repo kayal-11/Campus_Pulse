@@ -135,8 +135,28 @@ export async function updateBuildingDeviceConfig(buildingId, data) {
   return request(`/api/buildings/${buildingId}/device-config`, { method: 'PUT', body: JSON.stringify(data) });
 }
 
+export async function fetchBuildingCustomDevices(buildingId) {
+  return request(`/api/buildings/${buildingId}/custom-devices`);
+}
+
+export async function addCustomDevice(buildingId, data) {
+  return request(`/api/buildings/${buildingId}/custom-devices`, { method: 'POST', body: JSON.stringify(data) });
+}
+
+export async function updateCustomDevice(buildingId, deviceId, data) {
+  return request(`/api/buildings/${buildingId}/custom-devices/${deviceId}`, { method: 'PUT', body: JSON.stringify(data) });
+}
+
+export async function deleteCustomDevice(buildingId, deviceId) {
+  return request(`/api/buildings/${buildingId}/custom-devices/${deviceId}`, { method: 'DELETE' });
+}
+
 export async function fetchEnergyData() {
   return request('/api/energy');
+}
+
+export async function addManualMeterReading(data) {
+  return request('/api/energy/manual-reading', { method: 'POST', body: JSON.stringify(data) });
 }
 
 export async function refreshEnergyData() {

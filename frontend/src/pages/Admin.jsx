@@ -3,9 +3,13 @@ import Card from '../components/Card';
 import { useCampusData } from '../context/CampusDataContext';
 import {
   addBuilding,
+  addCustomDevice,
+  addManualMeterReading,
   deleteBuilding,
+  deleteCustomDevice,
   deleteUploadHistoryItem,
   exportReport,
+  fetchBuildingCustomDevices,
   fetchBuildingInventory,
   fetchAdminStats,
   fetchLatestUploadReport,
@@ -15,6 +19,7 @@ import {
   runAIPredictions,
   clearAllUploadHistory,
   updateBuildingInventory,
+  updateCustomDevice,
   uploadDailyMeterReadings,
 } from '../services/api';
 
@@ -32,6 +37,14 @@ function Admin({ searchQuery = '' }) {
   const [loading, setLoading] = useState('');
   const [toast, setToast] = useState(null);
   const [showAddForm, setShowAddForm] = useState(false);
+  const [showManualMeterForm, setShowManualMeterForm] = useState(false);
+  const [manualForm, setManualForm] = useState({
+    building_name: '',
+    custom_building_name: '',
+    date: new Date().toISOString().split('T')[0],
+    time: new Date().toTimeString().slice(0, 5),
+    meter_reading: '',
+  });
   const [form, setForm] = useState({ name: '', description: '', status: 'Active', initial_date: '', initial_time: '', initial_meter_reading: '' });
   const [inventoryForm, setInventoryForm] = useState(EMPTY_INVENTORY);
   const [editingInventory, setEditingInventory] = useState(null);
@@ -134,6 +147,47 @@ function Admin({ searchQuery = '' }) {
     }
   };
 
+  const handleSaveManualMeterReading = async (e) => {
+    e.preventDefault();
+    const targetBuildingName = (manualForm.custom_building_name || manualForm.building_name || '').trim();
+    if (!targetBuildingName) {
+      showToast('Please select or enter a Building Name.', 'error');
+      return;
+    }
+    if (!manualForm.date || !manualForm.time) {
+      showToast('Please select Date and Time.', 'error');
+      return;
+    }
+    if (manualForm.meter_reading === '' || Number(manualForm.meter_reading) < 0) {
+      showToast('Meter reading (kWh) must be a non-negative number.', 'error');
+      return;
+    }
+
+    setLoading('manual-meter');
+    try {
+      await addManualMeterReading({
+        building_name: targetBuildingName,
+        date: manualForm.date,
+        time: manualForm.time,
+        meter_reading: parseFloat(manualForm.meter_reading),
+      });
+      showToast(`Manual meter reading saved for ${targetBuildingName}!`);
+      setShowManualMeterForm(false);
+      setManualForm({
+        building_name: '',
+        custom_building_name: '',
+        date: new Date().toISOString().split('T')[0],
+        time: new Date().toTimeString().slice(0, 5),
+        meter_reading: '',
+      });
+      await Promise.all([refresh(), fetchAllAdminData()]);
+    } catch (err) {
+      showToast(err.message || 'Failed to save manual meter reading.', 'error');
+    } finally {
+      setLoading('');
+    }
+  };
+
   const handleDeleteBuilding = async (buildingId, buildingName) => {
     const confirmed = window.confirm(`Delete building "${buildingName}"? This will remove only this building and its related data.`);
     if (!confirmed) return;
@@ -150,10 +204,18 @@ function Admin({ searchQuery = '' }) {
     }
   };
 
+  const [customDevices, setCustomDevices] = useState([]);
+  const [newCustomDevice, setNewCustomDevice] = useState({ name: '', count: 1, wattage: 100, runtime_hours: 8 });
+  const [editingCustomDevice, setEditingCustomDevice] = useState(null);
+
   const handleOpenInventoryEditor = async (building) => {
     setLoading(`inventory-${building.id}`);
     try {
-      const current = await fetchBuildingInventory(building.id);
+      const [current, custom] = await Promise.all([
+        fetchBuildingInventory(building.id),
+        fetchBuildingCustomDevices(building.id).catch(() => []),
+      ]);
+      setCustomDevices(custom);
       setEditingInventory({
         buildingId: building.id,
         buildingName: building.name,
@@ -165,6 +227,64 @@ function Admin({ searchQuery = '' }) {
           lab_equipment: String(current.lab_equipment ?? 0),
         },
       });
+      setNewCustomDevice({ name: '', count: 1, wattage: 100, runtime_hours: 8 });
+      setEditingCustomDevice(null);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading('');
+    }
+  };
+
+  const handleAddCustomDevice = async (e) => {
+    e.preventDefault();
+    if (!editingInventory || !newCustomDevice.name.trim()) return;
+    setLoading(`add-custom-${editingInventory.buildingId}`);
+    try {
+      const created = await addCustomDevice(editingInventory.buildingId, {
+        name: newCustomDevice.name.trim(),
+        count: Math.max(0, parseInt(newCustomDevice.count, 10) || 0),
+        wattage: Math.max(0, parseFloat(newCustomDevice.wattage) || 0),
+        runtime_hours: Math.max(0, Math.min(24, parseFloat(newCustomDevice.runtime_hours) || 0)),
+      });
+      setCustomDevices((prev) => [...prev, created]);
+      setNewCustomDevice({ name: '', count: 1, wattage: 100, runtime_hours: 8 });
+      showToast(`Custom device "${created.name}" added to ${editingInventory.buildingName}`);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading('');
+    }
+  };
+
+  const handleSaveCustomDeviceEdit = async (deviceId) => {
+    if (!editingInventory || !editingCustomDevice) return;
+    setLoading(`edit-custom-${deviceId}`);
+    try {
+      const updated = await updateCustomDevice(editingInventory.buildingId, deviceId, {
+        name: editingCustomDevice.name.trim(),
+        count: Math.max(0, parseInt(editingCustomDevice.count, 10) || 0),
+        wattage: Math.max(0, parseFloat(editingCustomDevice.wattage) || 0),
+        runtime_hours: Math.max(0, Math.min(24, parseFloat(editingCustomDevice.runtime_hours) || 0)),
+      });
+      setCustomDevices((prev) => prev.map((d) => (d.id === deviceId ? updated : d)));
+      setEditingCustomDevice(null);
+      showToast(`Updated "${updated.name}"`);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading('');
+    }
+  };
+
+  const handleDeleteCustomDevice = async (deviceId, name) => {
+    if (!editingInventory) return;
+    if (!window.confirm(`Delete custom device "${name}"?`)) return;
+    setLoading(`delete-custom-${deviceId}`);
+    try {
+      await deleteCustomDevice(editingInventory.buildingId, deviceId);
+      setCustomDevices((prev) => prev.filter((d) => d.id !== deviceId));
+      showToast(`Deleted custom device "${name}"`);
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -324,6 +444,9 @@ function Admin({ searchQuery = '' }) {
         <button className="admin-btn admin-btn--primary" onClick={() => setShowAddForm((v) => !v)} disabled={!!loading}>
           ➕ Add Building
         </button>
+        <button className="admin-btn admin-btn--primary" onClick={() => setShowManualMeterForm((v) => !v)} disabled={!!loading}>
+          ⚡ Manual Meter Entry
+        </button>
         <button className="admin-btn admin-btn--ai" onClick={handleRunPrediction} disabled={!!loading}>
           {loading === 'predict' ? '⏳ Running…' : '🤖 Run AI Prediction'}
         </button>
@@ -334,7 +457,7 @@ function Admin({ searchQuery = '' }) {
           {loading === 'export' ? '⏳ Exporting…' : '📥 Export Report'}
         </button>
         <button className="admin-btn admin-btn--primary" onClick={handleUploadClick} disabled={!!loading}>
-          {loading === 'upload' ? '⏳ Uploading…' : '📤 Upload Daily Meter Readings'}
+          {loading === 'upload' ? '⏳ Uploading…' : '📤 Upload Meter Readings'}
         </button>
         <input
           ref={fileInputRef}
@@ -344,6 +467,78 @@ function Admin({ searchQuery = '' }) {
           hidden
         />
       </div>
+
+      {showManualMeterForm && (
+        <form className="admin-form" onSubmit={handleSaveManualMeterReading}>
+          <h3>Manual Meter Entry</h3>
+          <p className="card-detail" style={{ marginBottom: '1rem' }}>
+            Manually enter a meter reading for a building. The reading will save immediately to the database and update predictions, alerts, and charts.
+          </p>
+          <div className="admin-form-grid">
+            <label>
+              Select Building
+              <select
+                value={manualForm.building_name}
+                onChange={(e) => setManualForm({ ...manualForm, building_name: e.target.value, custom_building_name: '' })}
+              >
+                <option value="">Select Existing Building...</option>
+                {buildings.map((b) => (
+                  <option key={b.id} value={b.name}>
+                    {b.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Or Enter Building Name
+              <input
+                type="text"
+                placeholder="Type building name if not in list"
+                value={manualForm.custom_building_name}
+                onChange={(e) => setManualForm({ ...manualForm, custom_building_name: e.target.value })}
+              />
+            </label>
+            <label>
+              Date
+              <input
+                type="date"
+                value={manualForm.date}
+                onChange={(e) => setManualForm({ ...manualForm, date: e.target.value })}
+                required
+              />
+            </label>
+            <label>
+              Time
+              <input
+                type="time"
+                value={manualForm.time}
+                onChange={(e) => setManualForm({ ...manualForm, time: e.target.value })}
+                required
+              />
+            </label>
+            <label className="admin-form-full">
+              Meter Reading (kWh)
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="e.g. 1250.50"
+                value={manualForm.meter_reading}
+                onChange={(e) => setManualForm({ ...manualForm, meter_reading: e.target.value })}
+                required
+              />
+            </label>
+          </div>
+          <div className="admin-form-actions">
+            <button type="button" className="ghost-btn" onClick={() => setShowManualMeterForm(false)}>
+              Cancel
+            </button>
+            <button type="submit" className="admin-btn admin-btn--primary" disabled={loading === 'manual-meter'}>
+              {loading === 'manual-meter' ? 'Saving…' : '+ Save Reading'}
+            </button>
+          </div>
+        </form>
+      )}
 
       {showAddForm && (
         <form className="admin-form" onSubmit={handleAddBuilding}>
@@ -585,6 +780,147 @@ function Admin({ searchQuery = '' }) {
                   />
                 </label>
               </div>
+
+              <div className="admin-custom-devices-section" style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid var(--border-color, #e2e8f0)' }}>
+                <h4 style={{ margin: '0 0 1rem 0' }}>Other Custom Devices</h4>
+                {customDevices.length > 0 ? (
+                  <table className="device-table" style={{ width: '100%', marginBottom: '1rem' }}>
+                    <thead>
+                      <tr>
+                        <th>Device Name</th>
+                        <th>Count</th>
+                        <th>Power (W)</th>
+                        <th>Avg Hours</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {customDevices.map((dev) => (
+                        <tr key={dev.id}>
+                          {editingCustomDevice?.id === dev.id ? (
+                            <>
+                              <td>
+                                <input
+                                  type="text"
+                                  value={editingCustomDevice.name}
+                                  onChange={(e) => setEditingCustomDevice({ ...editingCustomDevice, name: e.target.value })}
+                                />
+                              </td>
+                              <td>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={editingCustomDevice.count}
+                                  onChange={(e) => setEditingCustomDevice({ ...editingCustomDevice, count: e.target.value })}
+                                />
+                              </td>
+                              <td>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={editingCustomDevice.wattage}
+                                  onChange={(e) => setEditingCustomDevice({ ...editingCustomDevice, wattage: e.target.value })}
+                                />
+                              </td>
+                              <td>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.1"
+                                  value={editingCustomDevice.runtime_hours}
+                                  onChange={(e) => setEditingCustomDevice({ ...editingCustomDevice, runtime_hours: e.target.value })}
+                                />
+                              </td>
+                              <td>
+                                <button type="button" className="pill" onClick={() => handleSaveCustomDeviceEdit(dev.id)}>Save</button>
+                                <button type="button" className="ghost-btn" onClick={() => setEditingCustomDevice(null)}>Cancel</button>
+                              </td>
+                            </>
+                          ) : (
+                            <>
+                              <td><strong>{dev.name}</strong></td>
+                              <td>{dev.count}</td>
+                              <td>{dev.wattage} W</td>
+                              <td>{dev.runtime_hours} hrs/day</td>
+                              <td>
+                                <button
+                                  type="button"
+                                  className="ghost-btn"
+                                  onClick={() => setEditingCustomDevice({ id: dev.id, name: dev.name, count: dev.count, wattage: dev.wattage, runtime_hours: dev.runtime_hours })}
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  className="ghost-btn"
+                                  style={{ color: '#ef4444' }}
+                                  onClick={() => handleDeleteCustomDevice(dev.id, dev.name)}
+                                >
+                                  Delete
+                                </button>
+                              </td>
+                            </>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <p style={{ fontSize: '0.875rem', color: '#64748b', marginBottom: '1rem' }}>No custom devices added yet for this building.</p>
+                )}
+
+                <div className="admin-add-custom-device-box" style={{ background: 'var(--card-bg-subtle, rgba(255,255,255,0.05))', padding: '1rem', borderRadius: '8px', border: '1px var(--border-color, #e2e8f0) dashed' }}>
+                  <h5 style={{ margin: '0 0 0.75rem 0' }}>Add Custom Device (e.g. Projector, Printer, Pump)</h5>
+                  <div className="admin-form-grid" style={{ gap: '0.5rem' }}>
+                    <label>
+                      Device Title / Name
+                      <input
+                        type="text"
+                        placeholder="e.g. Projector"
+                        value={newCustomDevice.name}
+                        onChange={(e) => setNewCustomDevice({ ...newCustomDevice, name: e.target.value })}
+                      />
+                    </label>
+                    <label>
+                      Count
+                      <input
+                        type="number"
+                        min="0"
+                        value={newCustomDevice.count}
+                        onChange={(e) => setNewCustomDevice({ ...newCustomDevice, count: e.target.value })}
+                      />
+                    </label>
+                    <label>
+                      Power (W)
+                      <input
+                        type="number"
+                        min="0"
+                        value={newCustomDevice.wattage}
+                        onChange={(e) => setNewCustomDevice({ ...newCustomDevice, wattage: e.target.value })}
+                      />
+                    </label>
+                    <label>
+                      Avg Operating Hours
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        max="24"
+                        value={newCustomDevice.runtime_hours}
+                        onChange={(e) => setNewCustomDevice({ ...newCustomDevice, runtime_hours: e.target.value })}
+                      />
+                    </label>
+                  </div>
+                  <button
+                    type="button"
+                    className="add-custom-device-btn"
+                    onClick={handleAddCustomDevice}
+                    disabled={!newCustomDevice.name.trim()}
+                  >
+                    + Add Custom Device
+                  </button>
+                </div>
+              </div>
               <div className="admin-form-actions">
                 <button type="button" className="ghost-btn" onClick={() => setEditingInventory(null)}>
                   Cancel
@@ -621,7 +957,7 @@ function Admin({ searchQuery = '' }) {
 
       <div className="admin-panels">
         <section className="admin-panel">
-          <h3>Daily Upload Summary</h3>
+          <h3>Meter Upload Summary</h3>
           {!latestBatch ? (
             <p className="admin-empty">No campus upload history found. Forecasts will use stored campus meter history.</p>
           ) : (
