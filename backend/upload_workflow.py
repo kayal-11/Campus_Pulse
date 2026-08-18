@@ -168,7 +168,8 @@ def _parse_rows(filename: str, payload: bytes) -> tuple[date, list[dict[str, obj
             }
         )
 
-    return batch_dates[0], rows
+    return batch_dates[-1], rows
+
 
 
 def _resolve_building(db: Session, user: User, building_name: str, external_building_id: str | None) -> Building:
@@ -220,17 +221,19 @@ def _resolve_building(db: Session, user: User, building_name: str, external_buil
     return building
 
 
-def _daily_totals_for_batch(db: Session, batch_id: int) -> dict[int | str, dict[str, object]]:
-    rows = (
+def _daily_totals_for_batch(db: Session, batch_id: int, target_date: date | None = None) -> dict[int | str, dict[str, object]]:
+    query = (
         db.query(
             CampusUploadedReading.building_id,
             CampusUploadedReading.building_name,
             func.sum(CampusUploadedReading.meter_reading).label("total_kwh"),
         )
         .filter(CampusUploadedReading.batch_id == batch_id)
-        .group_by(CampusUploadedReading.building_id, CampusUploadedReading.building_name)
-        .all()
     )
+    if target_date is not None:
+        query = query.filter(func.date(CampusUploadedReading.reading_at) == target_date)
+
+    rows = query.group_by(CampusUploadedReading.building_id, CampusUploadedReading.building_name).all()
     result: dict[int | str, dict[str, object]] = {}
     for row in rows:
         key = row.building_id if row.building_id is not None else row.building_name
@@ -240,6 +243,7 @@ def _daily_totals_for_batch(db: Session, batch_id: int) -> dict[int | str, dict[
             "total_kwh": round(float(row.total_kwh or 0.0), 2),
         }
     return result
+
 
 
 def _history_for_building(db: Session, user_id: int, building_id: int, limit: int = 7) -> list[float]:
@@ -315,7 +319,11 @@ def _forecast_for_total(
     batch_date: date,
     today_total: float,
     model,
-) -> dict[str, object]:
+) -> dict[str, object] | None:
+    from xgboost_service import is_supported_building, predict_next_day_xgboost
+    if not is_supported_building(building.name):
+        return None
+
     latest_energy = (
         db.query(EnergyReading)
         .filter(EnergyReading.building_id == building.id)
@@ -324,11 +332,12 @@ def _forecast_for_total(
     )
     meter = latest_energy.meter if latest_energy else 0
     _ = model
-    _ = batch_date
 
-    history = _history_for_building(db, building.owner.id, building.id)
-    predicted_energy = compute_campus_tomorrow_prediction(today_total, history)
-    model_source = "campus_data" if len(history) <= 1 else "campus_history+latest_upload"
+    try:
+        predicted_energy = predict_next_day_xgboost(db, building, today_total, batch_date)
+        model_source = "college_xgboost"
+    except Exception:
+        return None
 
     return {
         "predicted_energy": predicted_energy,
@@ -339,13 +348,18 @@ def _forecast_for_total(
     }
 
 
+
 def _build_comparison_rows(today_totals: dict[int | str, dict[str, object]], previous_totals: dict[int | str, dict[str, object]]) -> list[dict[str, object]]:
+    from xgboost_service import is_supported_building
     high_threshold = 0.0
     if today_totals:
         high_threshold = mean(item["total_kwh"] for item in today_totals.values()) * 1.15
 
     rows: list[dict[str, object]] = []
     for key, current in today_totals.items():
+        building_name = str(current.get("building_name", ""))
+        if not is_supported_building(building_name):
+            continue
         previous = previous_totals.get(key)
         today_total = float(current["total_kwh"])
         yesterday_total = float(previous["total_kwh"]) if previous else 0.0
@@ -371,6 +385,7 @@ def _build_comparison_rows(today_totals: dict[int | str, dict[str, object]], pre
             }
         )
     return sorted(rows, key=lambda item: (item["today_kwh"], abs(item["change_kwh"])), reverse=True)
+
 
 
 def _history_item_from_batch(batch: CampusUploadBatch) -> dict[str, object]:
@@ -502,17 +517,22 @@ def _batch_prediction_forecasts_for_user(
         .all()
     }
 
+    from xgboost_service import is_supported_building
+
     forecasts = []
     for prediction in latest_predictions:
+        b_name = building_name_by_id.get(int(prediction.building_id), "Building")
+        if not is_supported_building(b_name):
+            continue
         predicted_energy = round(float(prediction.predicted_energy), 2)
         forecasts.append(
             {
                 "building_id": prediction.building_id,
-                "building_name": building_name_by_id.get(int(prediction.building_id), "Building"),
+                "building_name": b_name,
                 "predicted_energy": predicted_energy,
                 "risk_level": _risk_level(predicted_energy),
                 "recommendation": _recommendation_text(predicted_energy),
-                "model_source": "campus_data" if int(prediction.building_id) in campus_building_ids else "campus_rf",
+                "model_source": "college_xgboost",
             }
         )
 
@@ -520,6 +540,7 @@ def _batch_prediction_forecasts_for_user(
 
 
 def get_upload_report_detail(db: Session, user_id: int, batch_id: int) -> dict[str, object]:
+    from xgboost_service import is_supported_building
     batch = (
         db.query(CampusUploadBatch)
         .filter(CampusUploadBatch.user_id == user_id, CampusUploadBatch.id == batch_id)
@@ -566,6 +587,7 @@ def get_upload_report_detail(db: Session, user_id: int, batch_id: int) -> dict[s
                 "model_source": forecast.model_source,
             }
             for forecast in forecasts
+            if is_supported_building(forecast.building_name)
         ]
     else:
         forecast_payload = _batch_prediction_forecasts_for_user(
@@ -575,11 +597,19 @@ def get_upload_report_detail(db: Session, user_id: int, batch_id: int) -> dict[s
             selected_building_id,
         )
 
-    return {
+    readings = db.query(CampusUploadedReading.building_name).filter(CampusUploadedReading.batch_id == batch.id).distinct().all()
+    has_unsupported = any(not is_supported_building(r.building_name) for r in readings)
+
+    report_data = {
         "batch": _history_item_from_batch(batch),
         "comparisons": comparisons,
         "forecasts": forecast_payload,
     }
+    if has_unsupported:
+        report_data["warning"] = "No historical data available for this building. Predictions are currently supported only for ADMIN, CHEMI, and ECE."
+
+    return report_data
+
 
 
 def list_upload_history(db: Session, user_id: int) -> list[dict[str, object]]:
@@ -676,9 +706,20 @@ def process_daily_upload(db: Session, user: User, filename: str, payload: bytes,
 
     db.flush()
 
-    today_totals = _daily_totals_for_batch(db, batch.id)
-    previous_totals = _daily_totals_for_batch(db, previous_batch.id) if previous_batch is not None else {}
-    comparisons = _build_comparison_rows(today_totals, previous_totals) if previous_batch is not None else []
+    today_totals = _daily_totals_for_batch(db, batch.id, target_date=batch_date)
+    from datetime import timedelta
+    prev_date = batch_date - timedelta(days=1)
+    prev_totals_in_batch = _daily_totals_for_batch(db, batch.id, target_date=prev_date)
+
+    if prev_totals_in_batch:
+        previous_totals = prev_totals_in_batch
+    elif previous_batch is not None:
+        previous_totals = _daily_totals_for_batch(db, previous_batch.id)
+    else:
+        previous_totals = {}
+
+    comparisons = _build_comparison_rows(today_totals, previous_totals) if previous_totals else []
+
 
     if previous_batch is None:
         batch.total_kwh = round(sum(float(item["total_kwh"]) for item in today_totals.values()), 2)

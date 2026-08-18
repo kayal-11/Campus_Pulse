@@ -1,6 +1,5 @@
 from datetime import date, datetime, time
 from typing import Optional
-
 from pydantic import BaseModel, Field
 
 
@@ -122,6 +121,9 @@ class PredictionOut(BaseModel):
     meter: int
     predicted_energy: float
     prediction_for_date: Optional[date] = None
+    actual_energy: Optional[float] = None
+    prediction_error: Optional[float] = None
+    model_source: str = "college_xgboost"
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -227,3 +229,4 @@ class CampusUploadReportOut(BaseModel):
     batch: CampusUploadHistoryItemOut
     comparisons: list[CampusUploadComparisonOut]
     forecasts: list[CampusUploadForecastOut]
+    warning: Optional[str] = None

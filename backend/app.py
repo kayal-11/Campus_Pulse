@@ -2,7 +2,8 @@ import csv
 import io
 import os
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+
 from pathlib import Path
 
 import joblib
@@ -54,8 +55,12 @@ from upload_workflow import (
     list_upload_history,
     process_daily_upload,
 )
+from xgboost_service import get_xgboost_artifact, get_xgboost_metrics, is_supported_building, predict_next_day_xgboost
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+
+
 
 app = FastAPI(title="Campus Energy AI API")
 
@@ -111,6 +116,13 @@ def _inventory_features_for_building(db: Session, building_id: int) -> dict[str,
 @app.on_event("startup")
 def on_startup():
     init_database()
+    artifact = get_xgboost_artifact()
+    if artifact and isinstance(artifact, dict) and "model" in artifact and "feature_columns" in artifact:
+        print(f"INFO: Campus XGBoost prediction model loaded successfully at startup.")
+    else:
+        print(f"ERROR: Campus XGBoost model (campus_energy_xgboost.pkl) failed to load at startup.")
+
+
 
 
 # ── Existing endpoints (unchanged contract) ──────────────────────────────────
@@ -620,12 +632,15 @@ async def add_manual_meter_reading(
         except Exception:
             pass
         report = get_upload_report_detail(db, user.id, batch_id)
+        if not is_supported_building(name_clean):
+            report["warning"] = "No historical data available for this building. Predictions are currently supported only for ADMIN, CHEMI, and ECE."
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception:
         db.rollback()
         raise
+
 
     building = (
         db.query(Building)
@@ -699,6 +714,48 @@ async def refresh_energy_data(db: Session = Depends(get_db), user: User = Depend
 
 # ── AI Predictions API ───────────────────────────────────────────────────────
 
+def _compute_actual_and_error(
+    db: Session,
+    building_id: int,
+    prediction_for_date: date | None,
+    predicted_energy: float,
+) -> tuple[float | None, float | None]:
+    if prediction_for_date is None:
+        return None, None
+
+    actual_row = (
+        db.query(func.sum(CampusUploadedReading.meter_reading).label("sum_kwh"))
+        .join(CampusUploadBatch, CampusUploadedReading.batch_id == CampusUploadBatch.id)
+        .filter(
+            CampusUploadedReading.building_id == building_id,
+            CampusUploadBatch.batch_date == prediction_for_date,
+        )
+        .first()
+    )
+    actual_kwh = float(actual_row.sum_kwh) if actual_row and actual_row.sum_kwh is not None else None
+
+    if actual_kwh is None:
+        energy_sum = (
+            db.query(func.sum(EnergyReading.meter_reading))
+            .filter(
+                EnergyReading.building_id == building_id,
+                func.date(EnergyReading.recorded_at) == prediction_for_date,
+            )
+            .scalar()
+        )
+        if energy_sum is not None:
+            actual_kwh = float(energy_sum)
+
+    if actual_kwh is not None:
+        actual_energy = round(actual_kwh, 2)
+        prediction_error = round(abs(float(predicted_energy) - actual_kwh), 2)
+        return actual_energy, prediction_error
+
+    return None, None
+
+
+# ── AI Predictions API ───────────────────────────────────────────────────────
+
 @app.post("/api/predictions/run", response_model=list[PredictionOut])
 async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     buildings = db.query(Building).filter(Building.user_id == user.id).all()
@@ -734,36 +791,26 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
         raise HTTPException(status_code=400, detail="Insufficient historical data for campus forecast.")
 
     results = []
+    unsupported_buildings_detected = False
+
     for building_id, total_kwh in latest_totals.items():
         building = building_map.get(building_id)
         if building is None:
+            continue
+
+        if not is_supported_building(building.name):
+            unsupported_buildings_detected = True
             continue
 
         today_total = max(float(total_kwh), 0.0)
         if today_total <= 0:
             continue
 
-        building_history_rows = (
-            db.query(
-                CampusUploadBatch.batch_date,
-                func.sum(CampusUploadedReading.meter_reading).label("total_kwh"),
-            )
-            .join(CampusUploadedReading, CampusUploadedReading.batch_id == CampusUploadBatch.id)
-            .filter(
-                CampusUploadBatch.user_id == user.id,
-                CampusUploadedReading.building_id == building_id,
-            )
-            .group_by(CampusUploadBatch.batch_date)
-            .order_by(CampusUploadBatch.batch_date.desc())
-            .limit(5)
-            .all()
-        )
-        history = [float(row.total_kwh or 0.0) for row in reversed(building_history_rows)]
-        if not history:
-            continue
-
         try:
-            predicted = compute_campus_tomorrow_prediction(today_total, history)
+            predicted = predict_next_day_xgboost(db, building, today_total, prediction_for_date)
+        except ValueError:
+            unsupported_buildings_detected = True
+            continue
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Unable to generate campus forecast. {exc}") from exc
 
@@ -777,6 +824,8 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
             .order_by(Prediction.created_at.desc())
             .first()
         )
+
+        actual_energy, prediction_error = _compute_actual_and_error(db, building_id, prediction_for_date, predicted)
 
         if (
             latest_prediction is not None
@@ -793,6 +842,9 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
                     meter=latest_prediction.meter,
                     predicted_energy=float(latest_prediction.predicted_energy),
                     prediction_for_date=latest_prediction.prediction_for_date,
+                    actual_energy=actual_energy,
+                    prediction_error=prediction_error,
+                    model_source="college_xgboost",
                     created_at=latest_prediction.created_at,
                 )
             )
@@ -816,11 +868,19 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
                 meter=prediction_meter,
                 predicted_energy=predicted,
                 prediction_for_date=pred.prediction_for_date,
+                actual_energy=actual_energy,
+                prediction_error=prediction_error,
+                model_source="college_xgboost",
                 created_at=pred.created_at,
             )
         )
 
     if not results:
+        if unsupported_buildings_detected:
+            raise HTTPException(
+                status_code=400,
+                detail="No historical data available for this building. Predictions are currently supported only for ADMIN, CHEMI, and ECE.",
+            )
         raise HTTPException(status_code=400, detail="Insufficient historical data for campus forecast.")
 
     db.commit()
@@ -842,22 +902,47 @@ def list_predictions(db: Session = Depends(get_db), user: User = Depends(get_cur
         .limit(20)
         .all()
     )
-    return [
-        PredictionOut(
-            id=r.Prediction.id,
-            building_id=r.Prediction.building_id,
-            building_name=r.name,
-            source_batch_id=r.Prediction.source_batch_id,
-            meter=r.Prediction.meter,
-            predicted_energy=r.Prediction.predicted_energy,
-            prediction_for_date=r.Prediction.prediction_for_date,
-            created_at=r.Prediction.created_at,
+    results = []
+    for r in rows:
+        if not is_supported_building(r.name):
+            continue
+        actual_energy, prediction_error = _compute_actual_and_error(
+            db, r.Prediction.building_id, r.Prediction.prediction_for_date, r.Prediction.predicted_energy
         )
-        for r in rows
-    ]
+        results.append(
+            PredictionOut(
+                id=r.Prediction.id,
+                building_id=r.Prediction.building_id,
+                building_name=r.name,
+                source_batch_id=r.Prediction.source_batch_id,
+                meter=r.Prediction.meter,
+                predicted_energy=r.Prediction.predicted_energy,
+                prediction_for_date=r.Prediction.prediction_for_date,
+                actual_energy=actual_energy,
+                prediction_error=prediction_error,
+                model_source="college_xgboost",
+                created_at=r.Prediction.created_at,
+            )
+        )
+    return results
+
+
+
+
+@app.get("/api/predictions/xgboost-metrics")
+def xgboost_metrics():
+    metrics = get_xgboost_metrics()
+    if not metrics:
+        raise HTTPException(status_code=404, detail="Campus XGBoost metrics not available")
+    return {
+        "model_name": "Campus XGBoost Regression Model",
+        "dataset": "college_energy_data.xlsx",
+        "metrics": metrics,
+    }
 
 
 # ── Admin stats ──────────────────────────────────────────────────────────────
+
 
 @app.get("/api/admin/stats", response_model=AdminStats)
 def admin_stats(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
@@ -922,12 +1007,18 @@ async def upload_daily_meter_readings(
         except Exception:
             pass
         report = get_upload_report_detail(db, user.id, batch_id)
+        readings_in_batch = db.query(CampusUploadedReading.building_name).filter(CampusUploadedReading.batch_id == batch_id).distinct().all()
+        for r_item in readings_in_batch:
+            if not is_supported_building(r_item.building_name):
+                report["warning"] = "No historical data available for this building. Predictions are currently supported only for ADMIN, CHEMI, and ECE."
+                break
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception:
         db.rollback()
         raise
+
 
     await manager.broadcast("daily_upload_processed", report)
     return report

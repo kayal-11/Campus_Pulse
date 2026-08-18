@@ -66,10 +66,6 @@ function Admin({ searchQuery = '' }) {
     }
   }, [showToast]);
 
-  useEffect(() => {
-    loadStats();
-  }, [loadStats]);
-
   const loadUploadData = useCallback(async () => {
     try {
       const [history, latest] = await Promise.all([fetchUploadHistory(), fetchLatestUploadReport()]);
@@ -85,9 +81,14 @@ function Admin({ searchQuery = '' }) {
     }
   }, [showToast]);
 
+  const fetchAllAdminData = useCallback(async () => {
+    await Promise.all([loadStats(), loadUploadData()]);
+  }, [loadStats, loadUploadData]);
+
   useEffect(() => {
-    loadUploadData();
-  }, [loadUploadData]);
+    fetchAllAdminData();
+  }, [fetchAllAdminData]);
+
 
   const normalizeInventory = (values) => ({
     lights: Math.max(0, Number.parseInt(values.lights || 0, 10) || 0),
@@ -96,6 +97,12 @@ function Admin({ searchQuery = '' }) {
     computers: Math.max(0, Number.parseInt(values.computers || 0, 10) || 0),
     lab_equipment: Math.max(0, Number.parseInt(values.lab_equipment || 0, 10) || 0),
   });
+
+  const isSupportedBuildingName = (name) => {
+    if (!name) return false;
+    const upper = name.trim().toUpperCase();
+    return ['ADMIN', 'CHEMI', 'ECE'].some((b) => upper.includes(b));
+  };
 
   const handleAddBuilding = async (e) => {
     e.preventDefault();
@@ -112,8 +119,12 @@ function Admin({ searchQuery = '' }) {
       setForm({ name: '', description: '', status: 'Active', initial_date: '', initial_time: '', initial_meter_reading: '' });
       setInventoryForm(EMPTY_INVENTORY);
       setShowAddForm(false);
-      await Promise.all([refresh(), loadStats()]);
-      showToast(`Building "${buildingName}" added successfully`);
+      await Promise.all([refresh(), fetchAllAdminData()]);
+      if (!isSupportedBuildingName(buildingName)) {
+        showToast('No historical data available for this building. Predictions are currently supported only for ADMIN, CHEMI, and ECE.', 'info');
+      } else {
+        showToast(`Building "${buildingName}" added successfully`);
+      }
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -125,7 +136,7 @@ function Admin({ searchQuery = '' }) {
     setLoading('predict');
     try {
       const results = await runAIPredictions();
-      await Promise.all([refresh(), loadStats()]);
+      await Promise.all([refresh(), fetchAllAdminData()]);
       showToast(`AI predictions completed for ${results.length} building(s)`);
     } catch (err) {
       showToast(err.message, 'error');
@@ -138,7 +149,7 @@ function Admin({ searchQuery = '' }) {
     setLoading('refresh');
     try {
       const result = await refreshEnergyData();
-      await Promise.all([refresh(), loadStats()]);
+      await Promise.all([refresh(), fetchAllAdminData()]);
       showToast(`Refreshed energy data for ${result.count} building(s)`);
     } catch (err) {
       showToast(err.message, 'error');
@@ -165,13 +176,17 @@ function Admin({ searchQuery = '' }) {
 
     setLoading('manual-meter');
     try {
-      await addManualMeterReading({
+      const resReading = await addManualMeterReading({
         building_name: targetBuildingName,
         date: manualForm.date,
         time: manualForm.time,
         meter_reading: parseFloat(manualForm.meter_reading),
       });
-      showToast(`Manual meter reading saved for ${targetBuildingName}!`);
+      if (!isSupportedBuildingName(targetBuildingName)) {
+        showToast('No historical data available for this building. Predictions are currently supported only for ADMIN, CHEMI, and ECE.', 'info');
+      } else {
+        showToast(`Manual meter reading saved for ${targetBuildingName}!`);
+      }
       setShowManualMeterForm(false);
       setManualForm({
         building_name: '',
@@ -181,6 +196,7 @@ function Admin({ searchQuery = '' }) {
         meter_reading: '',
       });
       await Promise.all([refresh(), fetchAllAdminData()]);
+
     } catch (err) {
       showToast(err.message || 'Failed to save manual meter reading.', 'error');
     } finally {
@@ -195,8 +211,9 @@ function Admin({ searchQuery = '' }) {
     setLoading('delete');
     try {
       await deleteBuilding(buildingId);
-      await Promise.all([refresh(), loadStats()]);
+      await Promise.all([refresh(), fetchAllAdminData()]);
       showToast(`Building "${buildingName}" deleted`);
+
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -340,13 +357,18 @@ function Admin({ searchQuery = '' }) {
       const report = await uploadDailyMeterReadings(file);
       setLatestUploadReport(report);
       setSelectedUploadReport(report);
-      await Promise.all([refresh(), loadStats(), loadUploadData()]);
-      showToast(`Uploaded ${report.batch.record_count} daily reading(s) from ${file.name}`);
+      await Promise.all([refresh(), fetchAllAdminData()]);
+      if (report.warning) {
+        showToast(report.warning, 'info');
+      } else {
+        showToast(`Uploaded ${report.batch.record_count} daily reading(s) from ${file.name}`);
+      }
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
       setLoading('');
     }
+
   };
 
   const handleOpenUploadReport = async (batchId) => {
@@ -367,7 +389,7 @@ function Admin({ searchQuery = '' }) {
     setLoading(`delete-history-${item.id}`);
     try {
       await deleteUploadHistoryItem(item.id);
-      await Promise.all([refresh(), loadStats(), loadUploadData()]);
+      await Promise.all([refresh(), fetchAllAdminData()]);
       showToast(`Deleted upload "${item.source_filename}"`);
     } catch (err) {
       showToast(err.message, 'error');
@@ -383,7 +405,7 @@ function Admin({ searchQuery = '' }) {
     setLoading('clear-history');
     try {
       const result = await clearAllUploadHistory();
-      await Promise.all([refresh(), loadStats(), loadUploadData()]);
+      await Promise.all([refresh(), fetchAllAdminData()]);
       showToast(result?.message || 'No campus upload history found. Forecasts will use stored campus meter history.');
     } catch (err) {
       showToast(err.message, 'error');
@@ -391,6 +413,7 @@ function Admin({ searchQuery = '' }) {
       setLoading('');
     }
   };
+
 
   const formatTime = (iso) => (iso ? new Date(iso).toLocaleString() : '—');
   const query = searchQuery.trim().toLowerCase();
@@ -942,17 +965,30 @@ function Admin({ searchQuery = '' }) {
           {filteredPredictions.length === 0 ? (
             <p className="admin-empty">{query ? 'No predictions match your search.' : 'No predictions yet. Click 🤖 Run AI Prediction.'}</p>
           ) : (
-            <ul className="admin-list">
-              {filteredPredictions.slice(0, 8).map((p) => (
-                <li key={p.id}>
-                  <strong>{p.building_name}</strong>
-                  <span>{p.predicted_energy.toFixed(1)} kWh</span>
-                  <span className="admin-time">{formatTime(p.created_at)}</span>
-                </li>
-              ))}
-            </ul>
+            <div className="table-wrapper">
+              <table className="prediction-table">
+                <thead>
+                  <tr>
+                    <th>Building</th>
+                    <th>Forecast Date</th>
+                    <th>Predicted (kWh)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredPredictions.slice(0, 8).map((p) => (
+                    <tr key={p.id}>
+                      <td><strong>{p.building_name}</strong></td>
+                      <td>{p.prediction_for_date ? new Date(p.prediction_for_date).toLocaleDateString() : formatTime(p.created_at)}</td>
+                      <td><span className="pred-value" style={{ fontWeight: 600, color: 'var(--primary, #2563eb)' }}>{p.predicted_energy.toFixed(1)} kWh</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </section>
+
+
       </div>
 
       <div className="admin-panels">
@@ -1037,7 +1073,11 @@ function Admin({ searchQuery = '' }) {
         <section className="admin-panel">
           <h3>{selectedBatch ? `Daily Comparison - ${new Date(selectedBatch.batch_date).toLocaleDateString()}` : 'Daily Comparison'}</h3>
           {selectedComparisons.length === 0 ? (
-            <p className="admin-empty">Upload a daily file to compare building-wise changes against the previous uploaded day.</p>
+            <p className="admin-empty">
+              {selectedUploadReport?.warning
+                ? selectedUploadReport.warning
+                : 'Upload a daily file to compare building-wise changes against the previous uploaded day.'}
+            </p>
           ) : (
             <ul className="admin-list">
               {selectedComparisons.slice(0, 8).map((item) => (
@@ -1061,7 +1101,9 @@ function Admin({ searchQuery = '' }) {
           <h3>{selectedBatch ? 'Tomorrow Forecast' : 'Forecast Preview'}</h3>
           {adminFutureForecasts.length === 0 ? (
             <p className="admin-empty">
-              {selectedBatch ? 'Prediction not available for this upload.' : 'Insufficient historical data for campus forecast.'}
+              {selectedUploadReport?.warning
+                ? selectedUploadReport.warning
+                : (selectedBatch ? 'Prediction not available for this upload.' : 'Insufficient historical data for campus forecast.')}
             </p>
           ) : (
             <ul className="admin-list">

@@ -367,32 +367,46 @@ function Prediction() {
   const rankedBuildings = latestBuildingPredictions.slice(0, 6);
   const latestRisk = latestPrediction ? getRiskLevel(latestPrediction.predicted_energy) : 'Low';
 
+  const selectedBuildingObj = useMemo(() => {
+    if (selectedBuildingId === 'all') return null;
+    return buildings.find((b) => String(b.id) === String(selectedBuildingId)) || null;
+  }, [buildings, selectedBuildingId]);
+
+  const isSelectedBuildingSupported = useMemo(() => {
+    if (selectedBuildingId === 'all') return true;
+    if (!selectedBuildingObj) return true;
+    const nameUpper = selectedBuildingObj.name.trim().toUpperCase();
+    return ['ADMIN', 'CHEMI', 'ECE'].some((b) => nameUpper.includes(b));
+  }, [selectedBuildingId, selectedBuildingObj]);
+
   const selectedBuildingPrediction = useMemo(() => {
+    if (!isSelectedBuildingSupported) return null;
     if (selectedBuildingId === 'all') return latestPrediction;
     return (
       latestPredictionsByBuilding.get(Number(selectedBuildingId)) ||
       latestPredictionsByBuilding.get(String(selectedBuildingId)) ||
-      latestPrediction
+      null
     );
-  }, [selectedBuildingId, latestPrediction, latestPredictionsByBuilding]);
+  }, [selectedBuildingId, isSelectedBuildingSupported, latestPrediction, latestPredictionsByBuilding]);
 
   const targetBuildingObj = useMemo(() => {
-    if (!selectedBuildingPrediction) return null;
+    if (!selectedBuildingPrediction) return selectedBuildingObj;
     return (
       buildings.find(
         (b) => b.id === selectedBuildingPrediction.building_id || b.name === selectedBuildingPrediction.building_name
-      ) || null
+      ) || selectedBuildingObj
     );
-  }, [buildings, selectedBuildingPrediction]);
+  }, [buildings, selectedBuildingPrediction, selectedBuildingObj]);
 
   const recommendations = useMemo(() => {
-    if (!selectedBuildingPrediction) return [];
+    if (!selectedBuildingPrediction || !isSelectedBuildingSupported) return [];
     return getDynamicRecommendationSet(
       selectedBuildingPrediction,
       targetBuildingObj,
       targetBuildingObj?.latest_reading || 1000
     );
-  }, [selectedBuildingPrediction, targetBuildingObj]);
+  }, [selectedBuildingPrediction, targetBuildingObj, isSelectedBuildingSupported]);
+
   const confidenceNote = 'Prediction generated using the trained Random Forest model.';
 
   const trendData = sortedPredictions.slice(0, 8).reverse().map((prediction) => ({
@@ -588,10 +602,12 @@ function Prediction() {
         ) : (
           <div className="prediction-card--empty-recommendations" style={{ padding: '2.5rem 1rem', textAlign: 'center', color: '#64748b' }}>
             <p style={{ fontSize: '1.05rem', fontWeight: 600, margin: '0 0 0.5rem 0', color: '#334155' }}>
-              Insufficient data for recommendations
+              {!isSelectedBuildingSupported ? 'Unsupported Building' : 'Insufficient data for recommendations'}
             </p>
             <p style={{ fontSize: '0.88rem', margin: 0 }}>
-              No prediction or valid forecast data available to generate dynamic recommendations for this building.
+              {!isSelectedBuildingSupported
+                ? 'No historical data available for this building. Predictions are currently supported only for ADMIN, CHEMI, and ECE.'
+                : 'No prediction or valid forecast data available to generate dynamic recommendations for this building.'}
             </p>
           </div>
         )}
@@ -606,38 +622,49 @@ function Prediction() {
           </div>
           <span className="pill">Forecast</span>
         </div>
-        <div className="future-forecast-grid">
-          <div className="future-forecast-card future-forecast-card--tomorrow">
-            <span className="forecast-accent forecast-accent--blue">Tomorrow Forecast</span>
-            <h4>Tomorrow Forecast</h4>
-            <div className="forecast-value">{formatKwh(tomorrowForecastKwh)}</div>
-            <p>Estimated energy demand for the next operating day.</p>
+        {!isSelectedBuildingSupported ? (
+          <div style={{ padding: '2rem', textAlign: 'center', color: '#64748b' }}>
+            <p style={{ fontSize: '0.95rem', fontWeight: 500, margin: 0, color: '#e11d48' }}>
+              No historical data available for this building. Predictions are currently supported only for ADMIN, CHEMI, and ECE.
+            </p>
           </div>
-          <div className="future-forecast-card future-forecast-card--weekly">
-            <span className="forecast-accent forecast-accent--purple">Weekly Outlook</span>
-            <h4>Weekly Outlook</h4>
-            <div className="forecast-value">{formatKwh(weeklyOutlookKwh)}</div>
-            <p>Expected demand based on current load trend and building mix.</p>
-          </div>
-          <div className="future-forecast-card future-forecast-card--monthly">
-            <span className="forecast-accent forecast-accent--orange">Monthly Energy Trend</span>
-            <h4>Monthly Energy Trend</h4>
-            <div className="forecast-value">{formatKwh(monthlyTrendKwh)}</div>
-            <p>Projected monthly energy usage and sustainability planning signal.</p>
-          </div>
-          <div className="future-forecast-card future-forecast-card--savings">
-            <span className="forecast-accent forecast-accent--green">Estimated Savings</span>
-            <h4>Estimated Savings</h4>
-            <div className="forecast-value">{formatKwh(forecastSavings)}</div>
-            <p>Potential savings from the recommended actions above.</p>
-          </div>
-        </div>
-        <div className="forecast-alert">
-          <strong>Peak demand warning</strong>
-          <p>{peakDemandWarning}</p>
-          <span>Explanation: forecasting is based on current prediction values and highlights likely demand pressure before peak hours.</span>
-        </div>
+        ) : (
+          <>
+            <div className="future-forecast-grid">
+              <div className="future-forecast-card future-forecast-card--tomorrow">
+                <span className="forecast-accent forecast-accent--blue">Tomorrow Forecast</span>
+                <h4>Tomorrow Forecast</h4>
+                <div className="forecast-value">{formatKwh(tomorrowForecastKwh)}</div>
+                <p>Estimated energy demand for the next operating day.</p>
+              </div>
+              <div className="future-forecast-card future-forecast-card--weekly">
+                <span className="forecast-accent forecast-accent--purple">Weekly Outlook</span>
+                <h4>Weekly Outlook</h4>
+                <div className="forecast-value">{formatKwh(weeklyOutlookKwh)}</div>
+                <p>Expected demand based on current load trend and building mix.</p>
+              </div>
+              <div className="future-forecast-card future-forecast-card--monthly">
+                <span className="forecast-accent forecast-accent--orange">Monthly Energy Trend</span>
+                <h4>Monthly Energy Trend</h4>
+                <div className="forecast-value">{formatKwh(monthlyTrendKwh)}</div>
+                <p>Projected monthly energy usage and sustainability planning signal.</p>
+              </div>
+              <div className="future-forecast-card future-forecast-card--savings">
+                <span className="forecast-accent forecast-accent--green">Estimated Savings</span>
+                <h4>Estimated Savings</h4>
+                <div className="forecast-value">{formatKwh(forecastSavings)}</div>
+                <p>Potential savings from the recommended actions above.</p>
+              </div>
+            </div>
+            <div className="forecast-alert">
+              <strong>Peak demand warning</strong>
+              <p>{peakDemandWarning}</p>
+              <span>Explanation: forecasting is based on current prediction values and highlights likely demand pressure before peak hours.</span>
+            </div>
+          </>
+        )}
       </section>
+
 
       <section className="prediction-card" title="Latest prediction history from backend data">
         <div className="prediction-section-title">
@@ -652,7 +679,7 @@ function Prediction() {
           <table className="prediction-table">
             <thead>
               <tr>
-                <th>Date &amp; Time</th>
+                <th>Forecast Date</th>
                 <th>Building Name</th>
                 <th>Predicted Energy</th>
                 <th>Risk Level</th>
@@ -664,11 +691,14 @@ function Prediction() {
                 const risk = getRiskLevel(prediction.predicted_energy);
                 const riskMeta = getRiskMeta(prediction.predicted_energy);
                 const statusMeta = getStatusMeta(risk);
+                const forecastDate = prediction.prediction_for_date
+                  ? new Date(prediction.prediction_for_date).toLocaleDateString()
+                  : new Date(prediction.created_at).toLocaleDateString();
                 return (
                   <tr key={prediction.id}>
-                    <td>{new Date(prediction.created_at).toLocaleString()}</td>
-                    <td>{prediction.building_name}</td>
-                    <td>{formatKwh(prediction.predicted_energy)}</td>
+                    <td>{forecastDate}</td>
+                    <td><strong>{prediction.building_name}</strong></td>
+                    <td><span className="pred-value" style={{ fontWeight: 600, color: 'var(--primary, #2563eb)' }}>{formatKwh(prediction.predicted_energy)}</span></td>
                     <td>
                       <span className={`risk-badge ${riskMeta.className}`}>
                         <span className="risk-badge__icon">{riskMeta.icon}</span>
@@ -684,6 +714,8 @@ function Prediction() {
             </tbody>
           </table>
         </div>
+
+
       </section>
     </div>
   );
