@@ -57,7 +57,7 @@ def is_supported_building(building_name: str) -> bool:
     if not building_name:
         return False
     name_clean = building_name.strip().upper()
-    return any(supported in name_clean for supported in SUPPORTED_BUILDINGS)
+    return name_clean in SUPPORTED_BUILDINGS or any(name_clean == supported for supported in SUPPORTED_BUILDINGS)
 
 
 

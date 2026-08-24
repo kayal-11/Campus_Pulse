@@ -55,7 +55,13 @@ from upload_workflow import (
     list_upload_history,
     process_daily_upload,
 )
-from xgboost_service import get_xgboost_artifact, get_xgboost_metrics, is_supported_building, predict_next_day_xgboost
+from xgboost_service import (
+    _history_daily_totals_for_building,
+    get_xgboost_artifact,
+    get_xgboost_metrics,
+    is_supported_building,
+    predict_next_day_xgboost,
+)
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
@@ -258,6 +264,9 @@ def _building_out(building: Building, db: Session) -> BuildingOut:
         .order_by(EnergyReading.recorded_at.desc())
         .first()
     )
+    inv = db.query(BuildingInventory).filter(BuildingInventory.building_id == building.id).first()
+    cfg = db.query(BuildingDeviceConfig).filter(BuildingDeviceConfig.building_id == building.id).first()
+    cust = db.query(BuildingCustomDevice).filter(BuildingCustomDevice.building_id == building.id).all()
     return BuildingOut(
         id=building.id,
         name=building.name,
@@ -265,6 +274,9 @@ def _building_out(building: Building, db: Session) -> BuildingOut:
         status=building.status,
         created_at=building.created_at,
         latest_reading=latest.meter_reading if latest else None,
+        inventory=_inventory_out(inv, building.id),
+        device_config=_device_config_out(cfg, building.id),
+        custom_devices=[CustomDeviceOut.model_validate(c) for c in cust] if cust else [],
     )
 
 
@@ -894,12 +906,47 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
 
 @app.get("/api/predictions", response_model=list[PredictionOut])
 def list_predictions(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    user_buildings = db.query(Building).filter(Building.user_id == user.id).all()
+    supported_buildings = [b for b in user_buildings if is_supported_building(b.name)]
+
+    if supported_buildings:
+        latest_batch = (
+            db.query(CampusUploadBatch)
+            .filter(CampusUploadBatch.user_id == user.id)
+            .order_by(CampusUploadBatch.batch_date.desc(), CampusUploadBatch.uploaded_at.desc())
+            .first()
+        )
+        for b in supported_buildings:
+            existing = (
+                db.query(Prediction)
+                .filter(Prediction.building_id == b.id)
+                .order_by(Prediction.created_at.desc())
+                .first()
+            )
+            if existing is None:
+                history = _history_daily_totals_for_building(db, b.id, limit=1)
+                today_total = history[-1] if history else 800.0
+                pred_date = (latest_batch.batch_date + timedelta(days=1)) if latest_batch else (datetime.now(timezone.utc).date() + timedelta(days=1))
+                try:
+                    predicted = predict_next_day_xgboost(db, b, today_total, pred_date)
+                    new_pred = Prediction(
+                        building_id=b.id,
+                        source_batch_id=latest_batch.id if latest_batch else None,
+                        meter=int(round(today_total)),
+                        predicted_energy=predicted,
+                        prediction_for_date=pred_date,
+                    )
+                    db.add(new_pred)
+                    db.commit()
+                except Exception:
+                    pass
+
     rows = (
         db.query(Prediction, Building.name)
         .join(Building, Prediction.building_id == Building.id)
         .filter(Building.user_id == user.id)
         .order_by(Prediction.created_at.desc())
-        .limit(20)
+        .limit(30)
         .all()
     )
     results = []

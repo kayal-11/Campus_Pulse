@@ -90,6 +90,9 @@ class BuildingOut(BaseModel):
     status: str
     created_at: datetime
     latest_reading: Optional[float] = None
+    inventory: Optional[BuildingInventoryOut] = None
+    device_config: Optional[BuildingDeviceConfigOut] = None
+    custom_devices: list[CustomDeviceOut] = []
 
     model_config = {"from_attributes": True}
 

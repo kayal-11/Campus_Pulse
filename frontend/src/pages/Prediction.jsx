@@ -398,14 +398,79 @@ function Prediction() {
     );
   }, [buildings, selectedBuildingPrediction, selectedBuildingObj]);
 
+  const supportedBuildingCards = useMemo(() => {
+    const supportedNames = ['ADMIN', 'CHEMI', 'ECE'];
+    return supportedNames.map((sName) => {
+      const bObj =
+        buildings.find((b) => b.name.trim().toUpperCase() === sName) ||
+        buildings.find((b) => b.name.trim().toUpperCase().includes(sName) && !b.name.trim().toUpperCase().includes('BLOCK'));
+      const bId = bObj ? bObj.id : null;
+      const bName = bObj ? bObj.name : sName;
+      const pred = bObj
+        ? (latestPredictionsByBuilding.get(bObj.id) ||
+           latestPredictionsByBuilding.get(String(bObj.id)) ||
+           [...latestPredictionsByBuilding.values()].find((p) => p.building_name?.trim().toUpperCase() === sName))
+        : null;
+
+      if (!pred || !bObj) {
+        return {
+          name: bName,
+          buildingId: bId,
+          hasData: false,
+          predictedEnergy: 0,
+          severity: 'Low',
+          recs: [],
+          topRecs: [],
+          totalDailySavings: 0,
+          totalMonthlySavingsInr: 0,
+        };
+      }
+
+      const bRecs = getDynamicRecommendationSet(pred, bObj, bObj.latest_reading || 800);
+      const predictedEnergy = Number(pred.predicted_energy) || 0;
+      const baselineEnergy = Math.max(100, Number(bObj.latest_reading) || 800);
+      const ratio = predictedEnergy / baselineEnergy;
+
+      let severity = 'Low';
+      if (predictedEnergy > 1800 || ratio >= 1.35) severity = 'Critical';
+      else if (predictedEnergy > 1000 || ratio >= 1.15) severity = 'High';
+      else if (predictedEnergy > 500 || ratio >= 0.95) severity = 'Medium';
+
+      const totalDailySavings = bRecs.reduce((sum, r) => {
+        const val = parseFloat(r.savings?.match(/[\d.]+/)?.[0] || '0');
+        return sum + val;
+      }, 0);
+      const totalMonthlySavingsInr = totalDailySavings * 30 * TARIFF_PER_KWH;
+
+      return {
+        name: bName,
+        buildingId: bObj.id,
+        hasData: true,
+        predictedEnergy,
+        severity,
+        recs: bRecs,
+        topRecs: bRecs.slice(0, 5),
+        totalDailySavings,
+        totalMonthlySavingsInr,
+      };
+    });
+  }, [buildings, latestPredictionsByBuilding]);
+
   const recommendations = useMemo(() => {
-    if (!selectedBuildingPrediction || !isSelectedBuildingSupported) return [];
-    return getDynamicRecommendationSet(
+    if (!isSelectedBuildingSupported) return [];
+
+    if (selectedBuildingId === 'all') {
+      return [];
+    }
+
+    if (!selectedBuildingPrediction) return [];
+    const fullSet = getDynamicRecommendationSet(
       selectedBuildingPrediction,
       targetBuildingObj,
-      targetBuildingObj?.latest_reading || 1000
+      targetBuildingObj?.latest_reading || 800
     );
-  }, [selectedBuildingPrediction, targetBuildingObj, isSelectedBuildingSupported]);
+    return fullSet.slice(0, 5);
+  }, [selectedBuildingId, isSelectedBuildingSupported, selectedBuildingPrediction, targetBuildingObj]);
 
   const confidenceNote = 'Prediction generated using the trained Random Forest model.';
 
@@ -576,13 +641,99 @@ function Prediction() {
           </div>
         </div>
 
-        {recommendations.length > 0 ? (
+        {selectedBuildingId === 'all' ? (
+          <div className="recommendations-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))' }}>
+            {supportedBuildingCards.map((bCard) => {
+              const impactClass = getImpactClass(bCard.severity);
+              const impactIcon = impactClass === 'high' ? '⚠' : impactClass === 'medium' ? '▲' : '✓';
+
+              return (
+                <article key={bCard.name} className="recommendation-card" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                  <div>
+                    <div className="recommendation-card__header" style={{ marginBottom: '0.75rem', alignItems: 'flex-start' }}>
+                      <div>
+                        <span style={{ fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748b', fontWeight: '600', display: 'block' }}>Building</span>
+                        <strong style={{ fontSize: '1.25rem', color: 'var(--text-color, #0f172a)' }}>{bCard.name}</strong>
+                      </div>
+                      <span className={`impact-badge impact-badge--${impactClass}`}>
+                        <span className="impact-icon">{impactIcon}</span>
+                        {bCard.severity}
+                      </span>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', background: 'var(--bg-subtle, rgba(241, 245, 249, 0.6))', padding: '0.75rem', borderRadius: '8px', marginBottom: '1rem', border: '1px solid var(--border-color, #e2e8f0)' }}>
+                      <div>
+                        <span style={{ fontSize: '0.72rem', color: '#64748b', display: 'block' }}>XGBoost Forecast</span>
+                        <strong style={{ fontSize: '0.95rem', color: 'var(--primary, #2563eb)' }}>{bCard.hasData ? formatKwh(bCard.predictedEnergy) : '—'}</strong>
+                      </div>
+                      <div>
+                        <span style={{ fontSize: '0.72rem', color: '#64748b', display: 'block' }}>Daily Savings</span>
+                        <strong style={{ fontSize: '0.95rem', color: '#16a34a' }}>{bCard.hasData ? `${formatKwh(bCard.totalDailySavings)}/day` : '—'}</strong>
+                      </div>
+                    </div>
+
+                    <div style={{ marginBottom: '1rem' }}>
+                      <p style={{ fontSize: '0.78rem', fontWeight: '700', color: '#475569', textTransform: 'uppercase', letterSpacing: '0.04em', margin: '0 0 0.5rem 0' }}>
+                        Top Recommended Actions ({bCard.topRecs.length})
+                      </p>
+                      {bCard.topRecs.length > 0 ? (
+                        <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: '0.55rem' }}>
+                          {bCard.topRecs.map((rec, rIdx) => (
+                            <li key={rIdx} style={{ fontSize: '0.84rem', color: 'var(--text-color, #334155)', lineHeight: '1.4', display: 'flex', alignItems: 'flex-start', gap: '0.45rem' }}>
+                              <span style={{ color: '#2563eb', fontWeight: 'bold', fontSize: '0.9rem', lineHeight: '1' }}>•</span>
+                              <div>
+                                <strong style={{ color: '#1e293b' }}>{rec.title}:</strong> {rec.detail}
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p style={{ fontSize: '0.84rem', color: '#64748b', margin: 0 }}>No active forecast data for recommendations.</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div style={{ borderTop: '1px solid var(--border-color, #e2e8f0)', paddingTop: '0.85rem', marginTop: '0.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                    <div>
+                      <span style={{ fontSize: '0.72rem', color: '#64748b', display: 'block' }}>Monthly Savings</span>
+                      <strong style={{ fontSize: '1.05rem', color: '#16a34a', fontWeight: '700' }}>
+                        {bCard.hasData ? `₹${bCard.totalMonthlySavingsInr.toFixed(0)}/month` : '—'}
+                      </strong>
+                    </div>
+                    {bCard.buildingId && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedBuildingId(String(bCard.buildingId))}
+                        style={{
+                          padding: '6px 14px',
+                          fontSize: '0.82rem',
+                          fontWeight: '600',
+                          borderRadius: '6px',
+                          background: 'var(--primary, #2563eb)',
+                          color: '#ffffff',
+                          border: 'none',
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '0.35rem',
+                          transition: 'all 0.15s ease',
+                        }}
+                      >
+                        View Details →
+                      </button>
+                    )}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : recommendations.length > 0 ? (
           <div className="recommendations-grid">
-            {recommendations.map((item) => {
+            {recommendations.map((item, index) => {
               const impactClass = getImpactClass(item.impact);
               const impactIcon = impactClass === 'high' ? '⚠' : impactClass === 'medium' ? '▲' : '✓';
               return (
-                <article key={item.title} className="recommendation-card">
+                <article key={`${item.buildingName || ''}-${item.title}-${index}`} className="recommendation-card">
                   <div className="recommendation-card__header">
                     <strong>{item.title}</strong>
                     <span className={`impact-badge impact-badge--${impactClass}`}>
