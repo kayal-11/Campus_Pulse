@@ -53,17 +53,29 @@ function getStatusMeta(risk) {
 
 const TARIFF_PER_KWH = 8.25;
 
+function isSupportedBuildingName(buildingName) {
+  if (!buildingName) return false;
+  const upper = String(buildingName).trim().toUpperCase();
+  return ['ADMIN', 'CHEMI', 'ECE'].some((b) => upper.includes(b));
+}
+
 function getDynamicRecommendationSet(prediction, buildingData, historicalAvgKwh = 1000) {
   if (!prediction || !prediction.predicted_energy || Number(prediction.predicted_energy) <= 0) {
     return [];
   }
 
-  const predictedEnergy = Number(prediction.predicted_energy) || 0;
   const buildingName = prediction.building_name || buildingData?.name || 'Selected Building';
-  const baselineEnergy = Math.max(100, Number(historicalAvgKwh) || 1000);
+
+  if (!isSupportedBuildingName(buildingName)) {
+    return [];
+  }
+
+  const predictedEnergy = Number(prediction.predicted_energy) || 0;
+  const latestActualKwh = Number(buildingData?.latest_reading) || Number(historicalAvgKwh) || 0;
+  const baselineEnergy = Math.max(100, latestActualKwh > 0 ? latestActualKwh : Number(historicalAvgKwh) || 800);
   const ratio = predictedEnergy / baselineEnergy;
 
-  // Determine severity dynamically: Low / Medium / High / Critical
+  // Determine severity dynamically from historical baseline vs forecast ratio
   let severity = 'Low';
   if (predictedEnergy > 1800 || ratio >= 1.35) {
     severity = 'Critical';
@@ -73,76 +85,188 @@ function getDynamicRecommendationSet(prediction, buildingData, historicalAvgKwh 
     severity = 'Medium';
   }
 
+  const inventory = buildingData?.inventory || {};
+  const config = buildingData?.device_config || {};
+  const customList = buildingData?.custom_devices || [];
+
+  // Device counts, power (wattage), operating hours
+  const acCount = Number(inventory.ac_units) || 0;
+  const acWattage = Number(config.acs_wattage) || 1500;
+  const acHours = Number(config.acs_hours) || 8;
+
+  const labCount = Number(inventory.lab_equipment) || 0;
+  const labWattage = Number(config.lab_wattage) || 900;
+  const labHours = Number(config.lab_hours) || 7;
+
+  const compCount = Number(inventory.computers) || 0;
+  const compWattage = Number(config.computers_wattage) || 140;
+  const compHours = Number(config.computers_hours) || 9;
+
+  const fanCount = Number(inventory.fans) || 0;
+  const fanWattage = Number(config.fans_wattage) || 75;
+  const fanHours = Number(config.fans_hours) || 10;
+
+  const lightCount = Number(inventory.lights) || 0;
+  const lightWattage = Number(config.lights_wattage) || 20;
+  const lightHours = Number(config.lights_hours) || 11;
+
+  // Identify high-consuming loads
+  const deviceLoads = [
+    { key: 'acs', label: 'ACs & Cooling', count: acCount, wattage: acWattage, hours: acHours, kwh: (acCount * acWattage * acHours) / 1000 },
+    { key: 'lab', label: 'Lab Equipment', count: labCount, wattage: labWattage, hours: labHours, kwh: (labCount * labWattage * labHours) / 1000 },
+    { key: 'computers', label: 'Workstations', count: compCount, wattage: compWattage, hours: compHours, kwh: (compCount * compWattage * compHours) / 1000 },
+    { key: 'fans', label: 'Ventilation Fans', count: fanCount, wattage: fanWattage, hours: fanHours, kwh: (fanCount * fanWattage * fanHours) / 1000 },
+    { key: 'lights', label: 'Lighting Fixtures', count: lightCount, wattage: lightWattage, hours: lightHours, kwh: (lightCount * lightWattage * lightHours) / 1000 },
+  ];
+
+  customList.forEach((cd) => {
+    const cCount = Number(cd.count) || 0;
+    const cWattage = Number(cd.wattage) || 100;
+    const cHours = Number(cd.runtime_hours) || 8;
+    deviceLoads.push({
+      key: `custom_${cd.id}`,
+      label: cd.name,
+      count: cCount,
+      wattage: cWattage,
+      hours: cHours,
+      kwh: (cCount * cWattage * cHours) / 1000,
+      isCustom: true,
+    });
+  });
+
+  const sortedLoads = [...deviceLoads].sort((a, b) => b.kwh - a.kwh);
+  const topLoad = sortedLoads[0];
+
   const recommendations = [];
 
   // 1. AC / HVAC Optimization
-  const acPct = severity === 'Critical' ? 0.16 : severity === 'High' ? 0.12 : severity === 'Medium' ? 0.08 : 0.04;
-  const acSavingsKwh = predictedEnergy * acPct;
-  const acSavingsPct = (acSavingsKwh / predictedEnergy) * 100;
-  const acMonthlySavingsInr = acSavingsKwh * 30 * TARIFF_PER_KWH;
-  const acImpact = severity === 'Critical' ? 'Critical' : severity === 'High' ? 'High' : 'Medium';
+  if (acCount > 0 && acWattage > 0 && acHours > 0) {
+    const hoursToReduce = severity === 'Critical' ? Math.min(acHours, 2.5) : severity === 'High' ? Math.min(acHours, 2.0) : severity === 'Medium' ? Math.min(acHours, 1.5) : Math.min(acHours, 1.0);
+    const acSavingsKwh = (acCount * acWattage * hoursToReduce) / 1000;
+    const acSavingsPct = (acSavingsKwh / predictedEnergy) * 100;
+    const acMonthlySavingsInr = acSavingsKwh * 30 * TARIFF_PER_KWH;
+    const acImpact = severity === 'Critical' ? 'Critical' : severity === 'High' ? 'High' : 'Medium';
 
-  recommendations.push({
-    title: severity === 'Critical' || severity === 'High' ? 'HVAC & cooling optimization' : 'Tune HVAC schedules',
-    impact: acImpact,
-    savings: `${formatKwh(acSavingsKwh)}/day (${acSavingsPct.toFixed(1)}% of forecast • ₹${acMonthlySavingsInr.toFixed(0)}/month)`,
-    detail: `Predicted demand of ${formatKwh(predictedEnergy)} for ${buildingName} indicates peak cooling load. Adjust thermostat setpoints +2°C and optimize runtime.`,
-  });
+    recommendations.push({
+      buildingName,
+      title: severity === 'Critical' || severity === 'High' ? 'HVAC & cooling optimization' : 'Tune HVAC schedules',
+      impact: acImpact,
+      dailySavingsKwh: acSavingsKwh,
+      savings: `${formatKwh(acSavingsKwh)}/day (${acSavingsPct.toFixed(1)}% of forecast • ₹${acMonthlySavingsInr.toFixed(0)}/month)`,
+      detail: `Predicted demand of ${formatKwh(predictedEnergy)} for ${buildingName} indicates peak cooling load across ${acCount} AC unit(s) (${acWattage}W each). Raise thermostat setpoint +2°C and adjust runtime by ${hoursToReduce.toFixed(1)} hrs/day.`,
+    });
+  }
 
   // 2. Ventilation Control
-  const ventPct = severity === 'Critical' ? 0.09 : severity === 'High' ? 0.07 : severity === 'Medium' ? 0.05 : 0.03;
-  const ventSavingsKwh = predictedEnergy * ventPct;
-  const ventSavingsPct = (ventSavingsKwh / predictedEnergy) * 100;
-  const ventMonthlySavingsInr = ventSavingsKwh * 30 * TARIFF_PER_KWH;
-  const ventImpact = severity === 'Critical' ? 'High' : severity === 'High' || severity === 'Medium' ? 'Medium' : 'Low';
+  if (fanCount > 0 && fanWattage > 0 && fanHours > 0) {
+    const hoursToReduce = severity === 'Critical' ? Math.min(fanHours, 2.0) : severity === 'High' ? Math.min(fanHours, 1.5) : severity === 'Medium' ? Math.min(fanHours, 1.0) : Math.min(fanHours, 0.5);
+    const ventSavingsKwh = (fanCount * fanWattage * hoursToReduce) / 1000;
+    const ventSavingsPct = (ventSavingsKwh / predictedEnergy) * 100;
+    const ventMonthlySavingsInr = ventSavingsKwh * 30 * TARIFF_PER_KWH;
+    const ventImpact = severity === 'Critical' ? 'High' : severity === 'High' || severity === 'Medium' ? 'Medium' : 'Low';
 
-  recommendations.push({
-    title: 'Optimize ventilation airflow',
-    impact: ventImpact,
-    savings: `${formatKwh(ventSavingsKwh)}/day (${ventSavingsPct.toFixed(1)}% of forecast • ₹${ventMonthlySavingsInr.toFixed(0)}/month)`,
-    detail: `Reschedule VAV fan airflow and operating hours to match predicted occupancy dips in ${buildingName}.`,
-  });
+    recommendations.push({
+      buildingName,
+      title: 'Optimize ventilation airflow',
+      impact: ventImpact,
+      dailySavingsKwh: ventSavingsKwh,
+      savings: `${formatKwh(ventSavingsKwh)}/day (${ventSavingsPct.toFixed(1)}% of forecast • ₹${ventMonthlySavingsInr.toFixed(0)}/month)`,
+      detail: `Reschedule ${fanCount} ventilation fan(s) (${fanWattage}W each) operating ${fanHours}h/day to match predicted occupancy dips in ${buildingName}, saving ${hoursToReduce.toFixed(1)} hrs/day.`,
+    });
+  }
 
   // 3. Standby-Load Management
-  const standbyPct = severity === 'Critical' ? 0.07 : severity === 'High' ? 0.06 : severity === 'Medium' ? 0.04 : 0.025;
-  const standbySavingsKwh = predictedEnergy * standbyPct;
-  const standbySavingsPct = (standbySavingsKwh / predictedEnergy) * 100;
-  const standbyMonthlySavingsInr = standbySavingsKwh * 30 * TARIFF_PER_KWH;
-  const standbyImpact = severity === 'Critical' || severity === 'High' ? 'High' : 'Medium';
+  if (compCount > 0 && compWattage > 0 && compHours > 0) {
+    const hoursToReduce = severity === 'Critical' ? Math.min(compHours, 3.0) : severity === 'High' ? Math.min(compHours, 2.5) : severity === 'Medium' ? Math.min(compHours, 2.0) : Math.min(compHours, 1.0);
+    const standbySavingsKwh = (compCount * compWattage * hoursToReduce) / 1000;
+    const standbySavingsPct = (standbySavingsKwh / predictedEnergy) * 100;
+    const standbyMonthlySavingsInr = standbySavingsKwh * 30 * TARIFF_PER_KWH;
+    const standbyImpact = severity === 'Critical' || severity === 'High' ? 'High' : 'Medium';
 
-  recommendations.push({
-    title: 'Automate standby-load power down',
-    impact: standbyImpact,
-    savings: `${formatKwh(standbySavingsKwh)}/day (${standbySavingsPct.toFixed(1)}% of forecast • ₹${standbyMonthlySavingsInr.toFixed(0)}/month)`,
-    detail: `Enforce automated power-down for workstations and idle electronics in ${buildingName} outside operational hours.`,
-  });
+    recommendations.push({
+      buildingName,
+      title: 'Automate standby-load power down',
+      impact: standbyImpact,
+      dailySavingsKwh: standbySavingsKwh,
+      savings: `${formatKwh(standbySavingsKwh)}/day (${standbySavingsPct.toFixed(1)}% of forecast • ₹${standbyMonthlySavingsInr.toFixed(0)}/month)`,
+      detail: `Enforce automated power-down for ${compCount} workstation(s) (${compWattage}W each) in ${buildingName} outside operational hours.`,
+    });
+  }
 
   // 4. Lighting Control
-  const lightPct = severity === 'Critical' ? 0.05 : severity === 'High' ? 0.04 : severity === 'Medium' ? 0.03 : 0.02;
-  const lightSavingsKwh = predictedEnergy * lightPct;
-  const lightSavingsPct = (lightSavingsKwh / predictedEnergy) * 100;
-  const lightMonthlySavingsInr = lightSavingsKwh * 30 * TARIFF_PER_KWH;
-  const lightImpact = severity === 'Critical' ? 'Medium' : 'Low';
+  if (lightCount > 0 && lightWattage > 0 && lightHours > 0) {
+    const hoursToReduce = severity === 'Critical' ? Math.min(lightHours, 2.5) : severity === 'High' ? Math.min(lightHours, 2.0) : severity === 'Medium' ? Math.min(lightHours, 1.5) : Math.min(lightHours, 1.0);
+    const lightSavingsKwh = (lightCount * lightWattage * hoursToReduce) / 1000;
+    const lightSavingsPct = (lightSavingsKwh / predictedEnergy) * 100;
+    const lightMonthlySavingsInr = lightSavingsKwh * 30 * TARIFF_PER_KWH;
+    const lightImpact = severity === 'Critical' ? 'Medium' : 'Low';
 
-  recommendations.push({
-    title: 'Occupancy-driven lighting control',
-    impact: lightImpact,
-    savings: `${formatKwh(lightSavingsKwh)}/day (${lightSavingsPct.toFixed(1)}% of forecast • ₹${lightMonthlySavingsInr.toFixed(0)}/month)`,
-    detail: `Implement motion sensors and dim corridor/common lighting in ${buildingName} during low-demand windows.`,
+    recommendations.push({
+      buildingName,
+      title: 'Occupancy-driven lighting control',
+      impact: lightImpact,
+      dailySavingsKwh: lightSavingsKwh,
+      savings: `${formatKwh(lightSavingsKwh)}/day (${lightSavingsPct.toFixed(1)}% of forecast • ₹${lightMonthlySavingsInr.toFixed(0)}/month)`,
+      detail: `Implement motion sensors and daylight harvesting for ${lightCount} fixture(s) (${lightWattage}W each) in ${buildingName} during low-demand windows.`,
+    });
+  }
+
+  // 5. Laboratory Equipment Optimization
+  if (labCount > 0 && labWattage > 0 && labHours > 0) {
+    const hoursToReduce = severity === 'Critical' ? Math.min(labHours, 2.0) : severity === 'High' ? Math.min(labHours, 1.5) : severity === 'Medium' ? Math.min(labHours, 1.0) : Math.min(labHours, 0.5);
+    const labSavingsKwh = (labCount * labWattage * hoursToReduce) / 1000;
+    const labSavingsPct = (labSavingsKwh / predictedEnergy) * 100;
+    const labMonthlySavingsInr = labSavingsKwh * 30 * TARIFF_PER_KWH;
+    const labImpact = severity === 'Critical' || severity === 'High' ? 'High' : 'Medium';
+
+    recommendations.push({
+      buildingName,
+      title: 'Lab equipment power-down schedule',
+      impact: labImpact,
+      dailySavingsKwh: labSavingsKwh,
+      savings: `${formatKwh(labSavingsKwh)}/day (${labSavingsPct.toFixed(1)}% of forecast • ₹${labMonthlySavingsInr.toFixed(0)}/month)`,
+      detail: `De-energize idle lab equipment (${labCount} unit(s), ${labWattage}W each) in ${buildingName} outside active research windows.`,
+    });
+  }
+
+  // 6. Custom Device Load Optimization
+  customList.forEach((cd) => {
+    const cCount = Number(cd.count) || 0;
+    const cWattage = Number(cd.wattage) || 0;
+    const cHours = Number(cd.runtime_hours) || 0;
+    if (cCount > 0 && cWattage > 0 && cHours > 0) {
+      const hoursToReduce = severity === 'Critical' ? Math.min(cHours, 2.0) : Math.min(cHours, 1.0);
+      const custSavingsKwh = (cCount * cWattage * hoursToReduce) / 1000;
+      const custSavingsPct = (custSavingsKwh / predictedEnergy) * 100;
+      const custMonthlySavingsInr = custSavingsKwh * 30 * TARIFF_PER_KWH;
+
+      recommendations.push({
+        buildingName,
+        title: `Optimize ${cd.name} operations`,
+        impact: severity === 'Critical' || severity === 'High' ? 'High' : 'Medium',
+        dailySavingsKwh: custSavingsKwh,
+        savings: `${formatKwh(custSavingsKwh)}/day (${custSavingsPct.toFixed(1)}% of forecast • ₹${custMonthlySavingsInr.toFixed(0)}/month)`,
+        detail: `Reduce operating runtime of ${cd.name} (${cCount} unit(s), ${cWattage}W each) by ${hoursToReduce.toFixed(1)} hrs/day in ${buildingName}.`,
+      });
+    }
   });
 
-  // 5. Peak Demand Load Shifting (for Critical or High severity)
-  if (severity === 'Critical' || severity === 'High') {
-    const peakSavingsKwh = predictedEnergy * 0.08;
+  // 7. Peak Demand Load Shifting (for Critical or High severity, targeting top load; excluded for ADMIN)
+  const isAdminBuilding = buildingName.trim().toUpperCase().includes('ADMIN');
+  if (!isAdminBuilding && (severity === 'Critical' || severity === 'High') && topLoad && topLoad.kwh > 0 && topLoad.count > 0) {
+    const shiftHours = severity === 'Critical' ? 2 : 1;
+    const peakSavingsKwh = (topLoad.count * topLoad.wattage * shiftHours) / 1000;
     const peakSavingsPct = (peakSavingsKwh / predictedEnergy) * 100;
     const peakMonthlySavingsInr = peakSavingsKwh * 30 * TARIFF_PER_KWH;
     const excessPct = Math.max(10, Math.round((ratio - 1) * 100));
 
     recommendations.push({
+      buildingName,
       title: 'Peak demand load-shifting',
       impact: 'Critical',
+      dailySavingsKwh: peakSavingsKwh,
       savings: `${formatKwh(peakSavingsKwh)}/day (${peakSavingsPct.toFixed(1)}% of forecast • ₹${peakMonthlySavingsInr.toFixed(0)}/month)`,
-      detail: `Forecast for ${buildingName} exceeds baseline load by ~${excessPct}%. Stagger energy-intensive equipment to prevent peak surcharges.`,
+      detail: `Forecast for ${buildingName} exceeds historical baseline by ~${excessPct}%. Stagger top load (${topLoad.label}: ${topLoad.count} unit(s), ${topLoad.wattage}W) away from peak hours.`,
     });
   }
 
