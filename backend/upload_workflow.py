@@ -339,12 +339,21 @@ def _forecast_for_total(
     except Exception:
         return None
 
+    from academic_calendar import get_calendar_day_status
+    cal_status = get_calendar_day_status(batch_date)
+    is_holiday = bool(cal_status and cal_status.get("is_holiday"))
+    holiday_name = cal_status.get("holiday_name") if cal_status else None
+    calendar_info = cal_status.get("calendar_name") if cal_status else None
+
     return {
         "predicted_energy": predicted_energy,
         "risk_level": _risk_level(predicted_energy),
         "recommendation": _recommendation_text(predicted_energy),
         "model_source": model_source,
         "meter": meter,
+        "is_holiday": is_holiday,
+        "holiday_name": holiday_name,
+        "calendar_info": calendar_info,
     }
 
 
@@ -518,6 +527,7 @@ def _batch_prediction_forecasts_for_user(
     }
 
     from xgboost_service import is_supported_building
+    from academic_calendar import get_calendar_day_status
 
     forecasts = []
     for prediction in latest_predictions:
@@ -525,6 +535,12 @@ def _batch_prediction_forecasts_for_user(
         if not is_supported_building(b_name):
             continue
         predicted_energy = round(float(prediction.predicted_energy), 2)
+        pred_date = prediction.prediction_for_date
+        cal_status = get_calendar_day_status(pred_date) if pred_date else None
+        is_holiday = bool(cal_status and cal_status.get("is_holiday"))
+        holiday_name = cal_status.get("holiday_name") if cal_status else None
+        calendar_info = cal_status.get("calendar_name") if cal_status else None
+
         forecasts.append(
             {
                 "building_id": prediction.building_id,
@@ -533,6 +549,9 @@ def _batch_prediction_forecasts_for_user(
                 "risk_level": _risk_level(predicted_energy),
                 "recommendation": _recommendation_text(predicted_energy),
                 "model_source": "college_xgboost",
+                "is_holiday": is_holiday,
+                "holiday_name": holiday_name,
+                "calendar_info": calendar_info,
             }
         )
 
@@ -541,6 +560,8 @@ def _batch_prediction_forecasts_for_user(
 
 def get_upload_report_detail(db: Session, user_id: int, batch_id: int) -> dict[str, object]:
     from xgboost_service import is_supported_building
+    from academic_calendar import get_calendar_day_status
+    from datetime import timedelta
     batch = (
         db.query(CampusUploadBatch)
         .filter(CampusUploadBatch.user_id == user_id, CampusUploadBatch.id == batch_id)
@@ -577,6 +598,12 @@ def get_upload_report_detail(db: Session, user_id: int, batch_id: int) -> dict[s
     ).all()
 
     if forecasts:
+        pred_date = batch.batch_date + timedelta(days=1)
+        cal_status = get_calendar_day_status(pred_date)
+        is_holiday = bool(cal_status and cal_status.get("is_holiday"))
+        holiday_name = cal_status.get("holiday_name") if cal_status else None
+        calendar_info = cal_status.get("calendar_name") if cal_status else None
+
         forecast_payload = [
             {
                 "building_id": forecast.building_id,
@@ -585,6 +612,9 @@ def get_upload_report_detail(db: Session, user_id: int, batch_id: int) -> dict[s
                 "risk_level": forecast.risk_level,
                 "recommendation": forecast.recommendation,
                 "model_source": forecast.model_source,
+                "is_holiday": is_holiday,
+                "holiday_name": holiday_name,
+                "calendar_info": calendar_info,
             }
             for forecast in forecasts
             if is_supported_building(forecast.building_name)

@@ -766,6 +766,38 @@ def _compute_actual_and_error(
     return None, None
 
 
+def _get_latest_actual_date_for_building(db: Session, building_id: int) -> date | None:
+    """Find the latest date for which actual energy data exists for a building."""
+    latest_uploaded_date = (
+        db.query(func.max(CampusUploadBatch.batch_date))
+        .join(CampusUploadedReading, CampusUploadedReading.batch_id == CampusUploadBatch.id)
+        .filter(CampusUploadedReading.building_id == building_id)
+        .scalar()
+    )
+    latest_energy_dt = (
+        db.query(func.max(EnergyReading.recorded_at))
+        .filter(EnergyReading.building_id == building_id)
+        .scalar()
+    )
+    latest_energy_date = (
+        latest_energy_dt.date()
+        if isinstance(latest_energy_dt, datetime)
+        else latest_energy_dt
+    )
+
+    if latest_uploaded_date and latest_energy_date:
+        return max(latest_uploaded_date, latest_energy_date)
+    return latest_uploaded_date or latest_energy_date
+
+
+def _get_next_forecast_date_for_building(db: Session, building_id: int) -> date:
+    """Calculates forecast_date as latest_actual_date + 1 day for a building."""
+    latest_actual = _get_latest_actual_date_for_building(db, building_id)
+    if latest_actual is not None:
+        return latest_actual + timedelta(days=1)
+    return datetime.now(timezone.utc).date() + timedelta(days=1)
+
+
 # ── AI Predictions API ───────────────────────────────────────────────────────
 
 @app.post("/api/predictions/run", response_model=list[PredictionOut])
@@ -773,7 +805,6 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
     buildings = db.query(Building).filter(Building.user_id == user.id).all()
     if not buildings:
         raise HTTPException(status_code=404, detail="No buildings found.")
-    building_map = {building.id: building for building in buildings}
 
     latest_batch = (
         db.query(CampusUploadBatch)
@@ -781,42 +812,22 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
         .order_by(CampusUploadBatch.batch_date.desc(), CampusUploadBatch.uploaded_at.desc())
         .first()
     )
-    if latest_batch is None:
-        raise HTTPException(status_code=400, detail="Insufficient historical data for campus forecast.")
-    prediction_for_date = latest_batch.batch_date + timedelta(days=1)
-
-    latest_totals: dict[int, float] = {}
-    latest_rows = (
-        db.query(
-            CampusUploadedReading.building_id,
-            func.sum(CampusUploadedReading.meter_reading).label("total_kwh"),
-        )
-        .filter(
-            CampusUploadedReading.batch_id == latest_batch.id,
-            CampusUploadedReading.building_id.isnot(None),
-        )
-        .group_by(CampusUploadedReading.building_id)
-        .all()
-    )
-    latest_totals = {int(row.building_id): float(row.total_kwh or 0.0) for row in latest_rows}
-    if not latest_totals:
-        raise HTTPException(status_code=400, detail="Insufficient historical data for campus forecast.")
 
     results = []
     unsupported_buildings_detected = False
 
-    for building_id, total_kwh in latest_totals.items():
-        building = building_map.get(building_id)
-        if building is None:
-            continue
-
+    for building in buildings:
         if not is_supported_building(building.name):
             unsupported_buildings_detected = True
             continue
 
-        today_total = max(float(total_kwh), 0.0)
+        building_id = building.id
+        prediction_for_date = _get_next_forecast_date_for_building(db, building_id)
+
+        history = _history_daily_totals_for_building(db, building_id, before_date=prediction_for_date, limit=1)
+        today_total = history[-1] if history else 800.0
         if today_total <= 0:
-            continue
+            today_total = 800.0
 
         try:
             predicted = predict_next_day_xgboost(db, building, today_total, prediction_for_date)
@@ -827,65 +838,80 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
             raise HTTPException(status_code=500, detail=f"Unable to generate campus forecast. {exc}") from exc
 
         prediction_meter = int(round(today_total))
-        latest_prediction = (
+
+        from academic_calendar import get_calendar_day_status
+        cal_status = get_calendar_day_status(prediction_for_date) if prediction_for_date else None
+        is_holiday = bool(cal_status and cal_status.get("is_holiday"))
+        holiday_name = cal_status.get("holiday_name") if cal_status else None
+        calendar_info = cal_status.get("calendar_name") if cal_status else None
+
+        actual_energy, prediction_error = _compute_actual_and_error(db, building_id, prediction_for_date, predicted)
+
+        # Prevent duplicate predictions for the same building + forecast date
+        existing_pred = (
             db.query(Prediction)
             .filter(
                 Prediction.building_id == building_id,
-                Prediction.source_batch_id == latest_batch.id,
+                Prediction.prediction_for_date == prediction_for_date,
             )
             .order_by(Prediction.created_at.desc())
             .first()
         )
 
-        actual_energy, prediction_error = _compute_actual_and_error(db, building_id, prediction_for_date, predicted)
+        if existing_pred is not None:
+            existing_pred.predicted_energy = predicted
+            existing_pred.meter = prediction_meter
+            if latest_batch:
+                existing_pred.source_batch_id = latest_batch.id
+            existing_pred.created_at = datetime.now(timezone.utc)
+            db.flush()
 
-        if (
-            latest_prediction is not None
-            and latest_prediction.meter == prediction_meter
-            and abs(float(latest_prediction.predicted_energy) - float(predicted)) < 1e-9
-            and latest_prediction.prediction_for_date == prediction_for_date
-        ):
             results.append(
                 PredictionOut(
-                    id=latest_prediction.id,
+                    id=existing_pred.id,
                     building_id=building_id,
                     building_name=building.name,
-                    source_batch_id=latest_prediction.source_batch_id,
-                    meter=latest_prediction.meter,
-                    predicted_energy=float(latest_prediction.predicted_energy),
-                    prediction_for_date=latest_prediction.prediction_for_date,
+                    source_batch_id=existing_pred.source_batch_id,
+                    meter=prediction_meter,
+                    predicted_energy=predicted,
+                    prediction_for_date=prediction_for_date,
                     actual_energy=actual_energy,
                     prediction_error=prediction_error,
                     model_source="college_xgboost",
-                    created_at=latest_prediction.created_at,
+                    created_at=existing_pred.created_at,
+                    is_holiday=is_holiday,
+                    holiday_name=holiday_name,
+                    calendar_info=calendar_info,
                 )
             )
-            continue
-
-        pred = Prediction(
-            building_id=building_id,
-            source_batch_id=latest_batch.id,
-            meter=prediction_meter,
-            predicted_energy=predicted,
-            prediction_for_date=prediction_for_date,
-        )
-        db.add(pred)
-        db.flush()
-        results.append(
-            PredictionOut(
-                id=pred.id,
+        else:
+            pred = Prediction(
                 building_id=building_id,
-                building_name=building.name,
-                source_batch_id=pred.source_batch_id,
+                source_batch_id=latest_batch.id if latest_batch else None,
                 meter=prediction_meter,
                 predicted_energy=predicted,
-                prediction_for_date=pred.prediction_for_date,
-                actual_energy=actual_energy,
-                prediction_error=prediction_error,
-                model_source="college_xgboost",
-                created_at=pred.created_at,
+                prediction_for_date=prediction_for_date,
             )
-        )
+            db.add(pred)
+            db.flush()
+            results.append(
+                PredictionOut(
+                    id=pred.id,
+                    building_id=building_id,
+                    building_name=building.name,
+                    source_batch_id=pred.source_batch_id,
+                    meter=prediction_meter,
+                    predicted_energy=predicted,
+                    prediction_for_date=pred.prediction_for_date,
+                    actual_energy=actual_energy,
+                    prediction_error=prediction_error,
+                    model_source="college_xgboost",
+                    created_at=pred.created_at,
+                    is_holiday=is_holiday,
+                    holiday_name=holiday_name,
+                    calendar_info=calendar_info,
+                )
+            )
 
     if not results:
         if unsupported_buildings_detected:
@@ -896,6 +922,8 @@ async def run_ai_predictions(db: Session = Depends(get_db), user: User = Depends
         raise HTTPException(status_code=400, detail="Insufficient historical data for campus forecast.")
 
     db.commit()
+
+    results.sort(key=lambda item: item.created_at, reverse=True)
 
     await manager.broadcast(
         "predictions_run",
@@ -917,16 +945,18 @@ def list_predictions(db: Session = Depends(get_db), user: User = Depends(get_cur
             .first()
         )
         for b in supported_buildings:
+            pred_date = _get_next_forecast_date_for_building(db, b.id)
             existing = (
                 db.query(Prediction)
-                .filter(Prediction.building_id == b.id)
-                .order_by(Prediction.created_at.desc())
+                .filter(
+                    Prediction.building_id == b.id,
+                    Prediction.prediction_for_date == pred_date,
+                )
                 .first()
             )
             if existing is None:
-                history = _history_daily_totals_for_building(db, b.id, limit=1)
+                history = _history_daily_totals_for_building(db, b.id, before_date=pred_date, limit=1)
                 today_total = history[-1] if history else 800.0
-                pred_date = (latest_batch.batch_date + timedelta(days=1)) if latest_batch else (datetime.now(timezone.utc).date() + timedelta(days=1))
                 try:
                     predicted = predict_next_day_xgboost(db, b, today_total, pred_date)
                     new_pred = Prediction(
@@ -945,17 +975,25 @@ def list_predictions(db: Session = Depends(get_db), user: User = Depends(get_cur
         db.query(Prediction, Building.name)
         .join(Building, Prediction.building_id == Building.id)
         .filter(Building.user_id == user.id)
-        .order_by(Prediction.created_at.desc())
+        .order_by(Prediction.created_at.desc(), Prediction.id.desc())
         .limit(30)
         .all()
     )
     results = []
+    from academic_calendar import get_calendar_day_status
+
     for r in rows:
         if not is_supported_building(r.name):
             continue
         actual_energy, prediction_error = _compute_actual_and_error(
             db, r.Prediction.building_id, r.Prediction.prediction_for_date, r.Prediction.predicted_energy
         )
+        pred_date = r.Prediction.prediction_for_date
+        cal_status = get_calendar_day_status(pred_date) if pred_date else None
+        is_holiday = bool(cal_status and cal_status.get("is_holiday"))
+        holiday_name = cal_status.get("holiday_name") if cal_status else None
+        calendar_info = cal_status.get("calendar_name") if cal_status else None
+
         results.append(
             PredictionOut(
                 id=r.Prediction.id,
@@ -969,8 +1007,13 @@ def list_predictions(db: Session = Depends(get_db), user: User = Depends(get_cur
                 prediction_error=prediction_error,
                 model_source="college_xgboost",
                 created_at=r.Prediction.created_at,
+                is_holiday=is_holiday,
+                holiday_name=holiday_name,
+                calendar_info=calendar_info,
             )
         )
+
+    results.sort(key=lambda item: item.created_at, reverse=True)
     return results
 
 

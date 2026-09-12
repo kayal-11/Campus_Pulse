@@ -149,7 +149,17 @@ def predict_next_day_xgboost(
 
     day_of_week = target_date.weekday()
     day_of_month = target_date.day
-    is_weekend = 1 if day_of_week >= 5 else 0
+
+    from academic_calendar import get_calendar_day_status
+    cal_status = get_calendar_day_status(target_date)
+    is_calendar_holiday = bool(cal_status and cal_status.get("is_holiday"))
+
+    if is_calendar_holiday:
+        is_weekend = 1
+        effective_dow = 6.0
+    else:
+        is_weekend = 1 if day_of_week >= 5 else 0
+        effective_dow = float(day_of_week)
 
     # Build feature dict matching training feature columns
     name_upper = building.name.upper()
@@ -160,7 +170,7 @@ def predict_next_day_xgboost(
             bldg_name = col[len("bldg_"):]
             row_dict[col] = 1.0 if bldg_name.upper() in name_upper else 0.0
         elif col == "day_of_week":
-            row_dict[col] = float(day_of_week)
+            row_dict[col] = effective_dow
         elif col == "day_of_month":
             row_dict[col] = float(day_of_month)
         elif col == "is_weekend":

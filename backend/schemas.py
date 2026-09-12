@@ -128,6 +128,9 @@ class PredictionOut(BaseModel):
     prediction_error: Optional[float] = None
     model_source: str = "college_xgboost"
     created_at: datetime
+    is_holiday: bool = False
+    holiday_name: Optional[str] = None
+    calendar_info: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -213,6 +216,9 @@ class CampusUploadForecastOut(BaseModel):
     risk_level: str
     recommendation: str
     model_source: str
+    is_holiday: bool = False
+    holiday_name: Optional[str] = None
+    calendar_info: Optional[str] = None
 
 
 class CampusUploadHistoryItemOut(BaseModel):

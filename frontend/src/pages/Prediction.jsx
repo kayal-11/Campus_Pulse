@@ -576,6 +576,8 @@ function Prediction() {
         topRecs: bRecs.slice(0, 5),
         totalDailySavings,
         totalMonthlySavingsInr,
+        isHoliday: Boolean(pred?.is_holiday),
+        holidayName: pred?.holiday_name,
       };
     });
   }, [buildings, latestPredictionsByBuilding]);
@@ -778,6 +780,11 @@ function Prediction() {
                       <div>
                         <span style={{ fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748b', fontWeight: '600', display: 'block' }}>Building</span>
                         <strong style={{ fontSize: '1.25rem', color: 'var(--text-color, #0f172a)' }}>{bCard.name}</strong>
+                        {bCard.isHoliday && (
+                          <span style={{ fontSize: '0.78rem', background: '#fef3c7', color: '#b45309', border: '1px solid #fde68a', padding: '2px 8px', borderRadius: '12px', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
+                            🏖 {bCard.holidayName || 'Holiday'}
+                          </span>
+                        )}
                       </div>
                       <span className={`impact-badge impact-badge--${impactClass}`}>
                         <span className="impact-icon">{impactIcon}</span>
@@ -940,7 +947,6 @@ function Prediction() {
         )}
       </section>
 
-
       <section className="prediction-card" title="Latest prediction history from backend data">
         <div className="prediction-section-title">
           <div>
@@ -981,7 +987,14 @@ function Prediction() {
                       </span>
                     </td>
                     <td>
-                      <span className={`status-badge ${statusMeta.className}`}>{statusMeta.text}</span>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', alignItems: 'flex-start' }}>
+                        <span className={`status-badge ${statusMeta.className}`}>{statusMeta.text}</span>
+                        {prediction.is_holiday && (
+                          <span style={{ fontSize: '0.75rem', background: '#fef3c7', color: '#b45309', border: '1px solid #fde68a', padding: '2px 8px', borderRadius: '12px', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
+                            🏖 {prediction.holiday_name || 'Holiday'}
+                          </span>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -989,8 +1002,6 @@ function Prediction() {
             </tbody>
           </table>
         </div>
-
-
       </section>
     </div>
   );
