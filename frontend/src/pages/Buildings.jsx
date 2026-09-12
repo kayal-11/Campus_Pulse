@@ -209,59 +209,6 @@ function buildEstimatedDeviceModel(building, deviceInputs, latestBuildingEnergyK
     aiInsights.push(`Secondary load insights unavailable due to missing device inventory.`);
   }
 
-  // Dynamic Recommended Actions: AC, Lab Equipment, Lighting, and Custom Devices
-  const recommendations = [];
-
-  // 1. AC Recommendation
-  if (acs && acs.count > 0 && acs.wattage > 0 && acs.runtimeHours > 0) {
-    const acHourlySavingsKwh = (acs.count * acs.wattage * 1) / 1000;
-    const acMonthlySavingsInr = acHourlySavingsKwh * 30 * TARIFF_PER_KWH;
-    recommendations.push(
-      `ACs: Reduce operating hours by 1 hour/day to save about ${acHourlySavingsKwh.toFixed(1)} kWh/day (₹${acMonthlySavingsInr.toFixed(0)}/month).`
-    );
-  } else if (acs && acs.count > 0) {
-    recommendations.push(`ACs: ${acs.count} unit(s) registered for ${building.name}. Update wattage and runtime to compute potential savings.`);
-  } else {
-    recommendations.push(`ACs: No active AC inventory recorded for ${building.name}.`);
-  }
-
-  // 2. Lab Equipment Recommendation
-  if (lab && lab.count > 0 && lab.wattage > 0 && lab.runtimeHours > 0) {
-    const hoursToReduce = Math.min(lab.runtimeHours, 1.5);
-    const labDailySavingsKwh = (lab.count * lab.wattage * hoursToReduce) / 1000;
-    const labMonthlySavingsInr = labDailySavingsKwh * 30 * TARIFF_PER_KWH;
-    recommendations.push(
-      `Lab Equipment: Power down idle equipment during off-peak hours to save about ${labDailySavingsKwh.toFixed(1)} kWh/day (₹${labMonthlySavingsInr.toFixed(0)}/month).`
-    );
-  } else if (lab && lab.count > 0) {
-    recommendations.push(`Lab Equipment: ${lab.count} item(s) logged. Configure power and operating hours to generate savings recommendations.`);
-  } else {
-    recommendations.push(`Lab Equipment: No lab equipment logged in inventory for ${building.name}.`);
-  }
-
-  // 3. Lighting Recommendation
-  if (lights && lights.count > 0 && lights.wattage > 0 && lights.runtimeHours > 0) {
-    const hoursToReduce = Math.min(lights.runtimeHours, 2);
-    const lightsDailySavingsKwh = (lights.count * lights.wattage * hoursToReduce) / 1000;
-    const lightsMonthlySavingsInr = lightsDailySavingsKwh * 30 * TARIFF_PER_KWH;
-    recommendations.push(
-      `Lighting: Implement occupancy sensors and daylight scheduling to save about ${lightsDailySavingsKwh.toFixed(1)} kWh/day (₹${lightsMonthlySavingsInr.toFixed(0)}/month).`
-    );
-  } else if (lights && lights.count > 0) {
-    recommendations.push(`Lighting: ${lights.count} fixture(s) present. Set wattage and hours to view dynamic lighting savings.`);
-  } else {
-    recommendations.push(`Lighting: No lighting fixtures logged in inventory for ${building.name}.`);
-  }
-
-  // 4. Custom Top Contributor Recommendation (if top load is a custom device)
-  if (top && top.isCustom && top.count > 0 && top.wattage > 0 && top.runtimeHours > 0) {
-    const customSavingsKwh = (top.count * top.wattage * 1) / 1000;
-    const customSavingsInr = customSavingsKwh * 30 * TARIFF_PER_KWH;
-    recommendations.push(
-      `${top.category}: As a major contributor, reducing operating hours by 1 hour/day saves about ${customSavingsKwh.toFixed(1)} kWh/day (₹${customSavingsInr.toFixed(0)}/month).`
-    );
-  }
-
   return {
     occupancy,
     rows,
@@ -270,7 +217,6 @@ function buildEstimatedDeviceModel(building, deviceInputs, latestBuildingEnergyK
     scalingFactor,
     tariffPerKwh: TARIFF_PER_KWH,
     aiInsights,
-    recommendations,
   };
 }
 
@@ -618,20 +564,12 @@ function Buildings() {
             </div>
           </div>
 
-          <div className="device-insights-grid">
+          <div className="device-insights-grid" style={{ gridTemplateColumns: '1fr' }}>
             <section className="device-panel">
               <h4>Estimation Insights</h4>
               <ul>
                 {deviceModel.aiInsights.map((insight) => (
                   <li key={insight}>{insight}</li>
-                ))}
-              </ul>
-            </section>
-            <section className="device-panel">
-              <h4>Recommended Actions</h4>
-              <ul>
-                {deviceModel.recommendations.map((item) => (
-                  <li key={item}>{item}</li>
                 ))}
               </ul>
             </section>
